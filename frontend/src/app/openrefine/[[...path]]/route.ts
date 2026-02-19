@@ -69,6 +69,13 @@ function rewriteLocationForProxy(location: string | null): string | null {
   }
 }
 
+function injectBaseHref(html: string): string {
+  if (html.includes("<base ")) {
+    return html;
+  }
+  return html.replace("<head>", '<head>\n  <base href="/openrefine/">');
+}
+
 async function proxy(request: Request, params: { path?: string[] }): Promise<Response> {
   try {
     await authorizeOpenRefineUi(request);
@@ -97,10 +104,27 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
         }
         continue;
       }
+      if (lowered === "content-length") {
+        continue;
+      }
       headers.append(key, value);
     }
 
-    return new Response(upstream.body, {
+    const contentType = upstream.headers.get("content-type") ?? "";
+    const isHtml = contentType.includes("text/html");
+
+    if (isHtml) {
+      const html = await upstream.text();
+      const rewrittenHtml = injectBaseHref(html);
+      return new Response(rewrittenHtml, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers
+      });
+    }
+
+    const upstreamBody = await upstream.arrayBuffer();
+    return new Response(upstreamBody, {
       status: upstream.status,
       statusText: upstream.statusText,
       headers
