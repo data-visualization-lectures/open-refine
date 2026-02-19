@@ -16,7 +16,7 @@ function parseProjectId(raw: string | null): string | null {
   if (!raw) {
     return null;
   }
-  const match = raw.match(/(?:[?&]|^)project=(\d+)/);
+  const match = raw.match(/project=(\d+)/);
   return match?.[1] ?? null;
 }
 
@@ -64,6 +64,44 @@ function parseProjectIdFromBody(raw: string): string | null {
   const fromProjectKey = raw.match(/"project(?:ID|Id)?"\s*:\s*"?(?<id>\d+)"?/)?.groups?.id;
   if (fromProjectKey) {
     return fromProjectKey;
+  }
+
+  return null;
+}
+
+type AllMetadataResponse = {
+  projects?: Record<
+    string,
+    {
+      name?: string;
+    }
+  >;
+};
+
+async function findProjectIdByName(
+  backendBase: string,
+  baseHeaders: Headers,
+  projectName: string
+): Promise<string | null> {
+  const metadataUrl = new URL("/command/core/get-all-project-metadata", backendBase);
+  const headers = new Headers(baseHeaders);
+  headers.delete("content-type");
+
+  const metadataResponse = await fetch(metadataUrl, {
+    method: "GET",
+    headers,
+    cache: "no-store"
+  });
+  if (!metadataResponse.ok) {
+    return null;
+  }
+
+  const body = (await metadataResponse.json()) as AllMetadataResponse;
+  const projects = body.projects ?? {};
+  for (const [projectId, metadata] of Object.entries(projects)) {
+    if (metadata?.name === projectName) {
+      return projectId;
+    }
   }
 
   return null;
@@ -132,6 +170,25 @@ export async function POST(request: Request): Promise<Response> {
       return relayBackendResponse(backendResponse);
     }
     if (!projectId) {
+      const fallbackFromMetadata = await findProjectIdByName(backendBase, headers, projectName);
+      if (fallbackFromMetadata) {
+        registerProject(fallbackFromMetadata, user.id, projectName);
+
+        const responseHeaders = new Headers();
+        const setCookie = backendResponse.headers.get("set-cookie");
+        if (setCookie) {
+          responseHeaders.append("set-cookie", setCookie);
+        }
+
+        return Response.json(
+          { projectId: fallbackFromMetadata, projectName, authMode, idSource: "metadata" },
+          {
+            status: 201,
+            headers: responseHeaders
+          }
+        );
+      }
+
       const fallbackBody = await backendResponse.text();
       const fallbackProjectId = parseProjectIdFromBody(fallbackBody);
       if (fallbackProjectId) {
@@ -144,14 +201,17 @@ export async function POST(request: Request): Promise<Response> {
         }
 
         return Response.json(
-          { projectId: fallbackProjectId, projectName, authMode },
+          { projectId: fallbackProjectId, projectName, authMode, idSource: "body" },
           {
             status: 201,
             headers: responseHeaders
           }
         );
       }
-      throw new ApiError(502, "Could not parse project id from OpenRefine redirect");
+      throw new ApiError(
+        502,
+        `Could not parse project id (status=${backendResponse.status}, location=${location ?? "none"}, finalUrl=${backendResponse.url})`
+      );
     }
 
     registerProject(projectId, user.id, projectName);
@@ -163,7 +223,7 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     return Response.json(
-      { projectId, projectName, authMode },
+      { projectId, projectName, authMode, idSource: "redirect" },
       {
         status: 201,
         headers: responseHeaders
