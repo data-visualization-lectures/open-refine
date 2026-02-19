@@ -5,6 +5,17 @@ import { buildBackendHeaders, ensureCsrfHeader } from "@/lib/proxy";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade"
+]);
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -58,8 +69,20 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
       cache: "no-store"
     });
 
-    const responseHeaders = new Headers(upstream.headers);
-    return new Response(upstream.body, {
+    const responseHeaders = new Headers();
+    for (const [key, value] of upstream.headers.entries()) {
+      const lowered = key.toLowerCase();
+      if (HOP_BY_HOP_RESPONSE_HEADERS.has(lowered)) {
+        continue;
+      }
+      if (lowered === "content-length" || lowered === "content-encoding") {
+        continue;
+      }
+      responseHeaders.append(key, value);
+    }
+
+    const upstreamBody = await upstream.arrayBuffer();
+    return new Response(upstreamBody, {
       status: upstream.status,
       statusText: upstream.statusText,
       headers: responseHeaders
