@@ -85,6 +85,10 @@ function injectBaseHref(html: string): string {
   return html.replace("<head>", '<head>\n  <base href="/openrefine/">');
 }
 
+function isRootOpenRefinePath(pathSegments: string[] | undefined): boolean {
+  return !pathSegments || pathSegments.length === 0;
+}
+
 async function proxy(request: Request, params: { path?: string[] }): Promise<Response> {
   try {
     await authorizeOpenRefineUi(request);
@@ -127,7 +131,7 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
 
     if (isHtml) {
       const html = await upstream.text();
-      const rewrittenHtml = injectBaseHref(html);
+      const rewrittenHtml = isRootOpenRefinePath(params.path) ? injectBaseHref(html) : html;
       return new Response(rewrittenHtml, {
         status: upstream.status,
         statusText: upstream.statusText,
