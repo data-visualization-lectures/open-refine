@@ -47,12 +47,26 @@ function requiredEnv(name: string): string {
   return value;
 }
 
+function requiredEnvAny(names: string[]): string {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value) {
+      return value;
+    }
+  }
+  throw new ApiError(500, `Missing environment variable: ${names.join(" or ")}`);
+}
+
 function supabaseUrl(): string {
-  return requiredEnv("NEXT_PUBLIC_SUPABASE_URL").replace(/\/$/, "");
+  return requiredEnvAny(["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL"]).replace(/\/$/, "");
 }
 
 function supabaseAnonKey(): string {
-  return requiredEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY");
+  return requiredEnvAny([
+    "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+    "SUPABASE_ANON_KEY",
+    "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"
+  ]);
 }
 
 function openRefineProjectBucket(): string {

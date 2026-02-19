@@ -14,6 +14,16 @@ function requiredEnv(name: string): string {
   return value;
 }
 
+function requiredEnvAny(names: string[]): string {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value) {
+      return value;
+    }
+  }
+  throw new ApiError(500, `Missing environment variable: ${names.join(" or ")}`);
+}
+
 function parseBearerToken(request: Request): string | null {
   const authHeader = request.headers.get("authorization");
   if (!authHeader) {
@@ -189,8 +199,12 @@ export async function requireAuthenticatedUser(request: Request): Promise<Authen
     throw new ApiError(401, "Missing Supabase access token");
   }
 
-  const supabaseUrl = requiredEnv("NEXT_PUBLIC_SUPABASE_URL");
-  const supabaseAnonKey = requiredEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY");
+  const supabaseUrl = requiredEnvAny(["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL"]);
+  const supabaseAnonKey = requiredEnvAny([
+    "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+    "SUPABASE_ANON_KEY",
+    "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"
+  ]);
 
   const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
     method: "GET",
