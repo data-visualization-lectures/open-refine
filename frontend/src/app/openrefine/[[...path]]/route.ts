@@ -70,6 +70,10 @@ function buildProxyHeaders(request: Request): Headers {
     headers.set("cookie", filteredCookie);
   }
 
+  // Keep OpenRefine initial UI language in Japanese by default.
+  const defaultAcceptLanguage = process.env.OPENREFINE_DEFAULT_ACCEPT_LANGUAGE?.trim() || "ja-JP,ja;q=0.9,en;q=0.7";
+  headers.set("accept-language", defaultAcceptLanguage);
+
   headers.set("x-openrefine-proxy-secret", requireEnv("OPENREFINE_SHARED_SECRET"));
   return headers;
 }
