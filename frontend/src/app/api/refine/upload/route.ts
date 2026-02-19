@@ -154,6 +154,10 @@ export async function POST(request: Request): Promise<Response> {
     }
     const headers = buildBackendHeaders(request);
     await ensureCsrfHeader(request, headers, "POST");
+    const csrfToken = headers.get("x-token");
+    if (csrfToken) {
+      backendUrl.searchParams.set("csrf_token", csrfToken);
+    }
     const backendResponse = await fetch(backendUrl, {
       method: "POST",
       headers,
