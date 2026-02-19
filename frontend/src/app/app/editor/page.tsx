@@ -1,6 +1,6 @@
 export default function EditorPage() {
   return (
-    <main style={{ height: "100vh", width: "100%", overflow: "hidden", background: "#fff" }}>
+    <main style={{ height: "calc(100vh - 48px)", marginTop: 48, width: "100%", overflow: "hidden", background: "#fff" }}>
       <iframe
         src="/openrefine/"
         title="OpenRefine UI"
