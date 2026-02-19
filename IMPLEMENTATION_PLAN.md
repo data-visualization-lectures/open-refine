@@ -16,12 +16,23 @@ https://github.com/OpenRefine/OpenRefine.git
 
 ---
 
+## 現在の反映状況（2026-02-19）
+
+- フロントエンドは Vercel、OpenRefine 本体は Railway の分離構成で運用中。
+- カスタムドメイン `https://open-refine.dataviz.jp/` はリダイレクトではなく、そのままエディタ UI（iframe）を表示。
+- OpenRefine 互換 UI は `/openrefine/*` で配信し、OpenRefine が絶対パスで呼ぶ `/command/*` も Vercel 側で Railway へプロキシ。
+- Railway 側は `OPENREFINE_SHARED_SECRET` ヘッダー必須。ヘッダーなし直アクセスは 403。
+- 開発確認用に、`/api/refine/upload` のみ匿名作成モード（`ALLOW_ANON_PROJECT_CREATE=true`）をサポート。
+- 初期言語は日本語を既定にするため、`load-language` 呼び出し時に `lang=ja` を補完する実装を追加済み。
+
+---
+
 ## アーキテクチャ概要
 
 ```
 Browser
-  → Vercel (Next.js カスタム UI + Supabase Auth)
-      → Next.js API Routes（認証済みプロキシ）
+  → Vercel (Next.js + Supabase Auth + OpenRefine UI proxy)
+      → Next.js Route Handlers（認証済みプロキシ）
           → Railway (OpenRefine コンテナ)
 ```
 
@@ -44,17 +55,20 @@ openrefine/
 │   └── healthcheck.sh
 └── frontend/
     ├── package.json
-    ├── next.config.ts
-    ├── vercel.json          # Cron 設定
+    ├── next.config.mjs
+    ├── vercel.json          # Cron 設定（cleanup-orphans）
     ├── .env.example
     └── src/
         ├── app/
         │   ├── layout.tsx
-        │   ├── page.tsx
+        │   ├── page.tsx                      # / で editor を表示（非リダイレクト）
         │   ├── app/
         │   │   ├── layout.tsx         # Auth guard
         │   │   └── editor/
         │   │       └── page.tsx       # メインエディタ
+        │   ├── command/
+        │   │   └── [[...path]]/
+        │   │       └── route.ts       # /command/* プロキシ（絶対パス対策）
         │   ├── api/
         │   │   ├── refine/
         │   │   │   ├── [...path]/
@@ -74,8 +88,11 @@ openrefine/
         │   ├── TransformPanel.tsx
         │   └── ExportMenu.tsx
         └── lib/
-            ├── refine-client.ts    # ブラウザ側 API クライアント
-            └── project-id.ts      # ユーザースコープ命名
+            ├── auth.ts              # Supabase user 解決
+            ├── proxy.ts             # OpenRefine proxy共通処理
+            ├── project-registry.ts  # projectId 所有者管理（in-memory）
+            ├── refine-client.ts     # ブラウザ側 API クライアント
+            └── project-id.ts        # ユーザースコープ命名
 ```
 
 ---
@@ -136,9 +153,13 @@ http {
     proxy_send_timeout 300s;
     proxy_read_timeout 300s;
     location / {
+      if ($http_x_openrefine_proxy_secret != "${OPENREFINE_SHARED_SECRET}") {
+        return 403;
+      }
       proxy_pass http://127.0.0.1:3333;
       proxy_http_version 1.1;
       proxy_set_header Host localhost;
+      proxy_set_header X-OpenRefine-Proxy-Secret "";
       proxy_pass_request_headers on;
     }
   }
@@ -149,29 +170,41 @@ http {
 
 ```bash
 #!/bin/bash
-set -e
+set -euo pipefail
 
-if [ -z "${PORT}" ]; then
+if [ -z "${PORT:-}" ]; then
   echo "ERROR: PORT not set"
   exit 1
 fi
 
-envsubst '${PORT}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+if [ -z "${OPENREFINE_SHARED_SECRET:-}" ]; then
+  echo "ERROR: OPENREFINE_SHARED_SECRET not set"
+  exit 1
+fi
+
+envsubst '${PORT} ${OPENREFINE_SHARED_SECRET}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 nginx -g "daemon off;" &
+NGINX_PID=$!
 
 /opt/openrefine/refine \
-    -i 127.0.0.1 -p 3333 \
-    -m "${REFINE_MEMORY:-1400M}" \
-    -x refine.headless=true -d /data &
+  -i 127.0.0.1 -p 3333 \
+  -m "${REFINE_MEMORY:-1400M}" \
+  -x refine.headless=true -d /data &
+REFINE_PID=$!
 
 for i in $(seq 1 60); do
-  curl -sf http://127.0.0.1:3333/ > /dev/null 2>&1 && break
-  [ $i -eq 60 ] && echo "ERROR: OpenRefine failed to start" && exit 1
+  if curl -sf http://127.0.0.1:3333/ > /dev/null 2>&1; then
+    break
+  fi
+  if [ "$i" -eq 60 ]; then
+    echo "ERROR: OpenRefine failed to start"
+    exit 1
+  fi
   sleep 1
 done
 echo "OpenRefine ready"
 
-wait -n
+wait -n "$NGINX_PID" "$REFINE_PID"
 ```
 
 ### backend/healthcheck.sh
@@ -205,32 +238,25 @@ Railway は `backend/` ディレクトリの Dockerfile を自動検出。`railw
 2. プロジェクト操作コマンドは所有権チェック
 3. 認証済みリクエストを Railway に転送
 
-OpenRefine の `project` パラメータは numericId なので、`x-project-name` を受けた Upload 経路で `numericId→userId` のマッピング（Supabase のテーブルや in-memory registry）を保持し、すべてのルートで `project` の所有者チェックを通す。これをやらずにプレフィックスだけ見ると numericId を知った攻撃者に横断アクセスされるため、`project` から映る ownerId を公開しないアクセス制御レイヤーが必要。
-
-**マルチユーザー分離ロジック:**
-プロジェクト名を `{supabaseUserId}_{timestamp}_{random}` で命名し、プロキシ側でプレフィックスを確認。他人のプロジェクトへのアクセスは 403 を返す。
+OpenRefine の `project` パラメータは numericId なので、`upload` 時にサーバー側で `projectName={userId}_{timestamp}_{random}` を生成し、返ってきた `projectId` を `project-registry`（in-memory）に `projectId→ownerId` として登録する。`get-rows` などの対象コマンドは毎回この所有者チェックを通し、未一致は 403 を返す。
 
 所有権チェック対象コマンド:
 `get-rows`, `get-columns`, `get-project-metadata`, `apply-operations`,
 `export-rows`, `delete-project`, `get-models`, `compute-facets`
 
-```typescript
-function userOwnsProject(userId: string, projectName: string): boolean {
-  return projectName.startsWith(`${userId}_`)
-}
-```
-
-上記のプレフィックスチェックは補助的な知識であり、必ず `project` numericId → ownerId のレコードと照合する。乗っ取られたリクエストでも、プロキシがそのマッピングを参照して異なる owner のプロジェクトにアクセスしないようにする。
-
-未列挙のコマンドはプロキシ経由で発生しないよう、Next.js 側で API ルートを最小化したホワイトリスト方式とし、`[...]` キャッチオールの代わりに実際に使う `command` のみを許可。API ルートで `path` を解析してホワイトリストにない endpoint を 400/403 で弾く。これにより今後追加される OpenRefine コマンドでも即座にレビューでき、ブラックリストの漏れを防げる。
+未列挙のコマンドは `assertAllowedCommand()` のホワイトリストで拒否する。
 
 ### Railway 直アクセス制御
 
-Railway のバックエンド URL はデプロイ完了後に外部へ公開されるので、そのまま OpenRefine を叩かれると Supabase 認証／プロキシ／所有権ロジックが効かなくなる。Railway 側で Vercel からのリクエストしか受け付けない共有シークレットヘッダーや IP 制限を追加するか、Vercel が HMAC シグネチャを付与して携帯情報を検証できる仕組みを併用し、直接アクセスを拒否することを想定する。
+Railway は Nginx で `x-openrefine-proxy-secret` を検証し、`OPENREFINE_SHARED_SECRET` 不一致時は 403 を返す。これにより Railway URL を直接叩いても Vercel プロキシを経由しないリクエストは拒否される。
 
 ### 元 OpenRefine UI の公開（プロキシ経由）
 
 `/openrefine/*` を Next.js Route Handler で Railway に透過し、`x-openrefine-proxy-secret` をサーバー側で付与して元 UI（`wirings.js` / `index-bundle.js` / `styles/*` など）をそのまま配信する。Railway 直リンクは使わず、ブラウザからは常に Vercel 経由でアクセスする。
+
+OpenRefine 側の一部機能は絶対パスで `/command/*` を呼ぶため、`src/app/command/[[...path]]/route.ts` でも同様に Railway へプロキシする。これを入れないと `/command/core/get-version` が 404 になり、拡張機能画面で JSON パースエラーが発生する。
+
+`load-language` の POST は `lang` 未指定だと英語フォールバックになるケースがあるため、`OPENREFINE_DEFAULT_UI_LANG`（未設定時は `OPENREFINE_DEFAULT_ACCEPT_LANGUAGE` から推定、最終既定 `ja`）を使って `lang` を補完する。
 
 開発中に Supabase 接続前で UI を確認したい場合のみ `ALLOW_ANON_OPENREFINE_UI=true` を使い、`/openrefine/*` への未認証アクセスを許可する。本番では `false` に戻す。
 
@@ -239,8 +265,9 @@ Railway のバックエンド URL はデプロイ完了後に外部へ公開さ�
 `src/app/api/refine/upload/route.ts`
 
 - `multipart/form-data` をそのまま転送（バイナリ破損防止）
-- `x-project-name: {userId}_{ts}_{rand}` ヘッダーでプロジェクト名を指定
+- サーバー側で `projectName={userId}_{timestamp}_{random}` を生成して OpenRefine に指定
 - OpenRefine のリダイレクト先 URL から数値 projectId を取得して返す
+- リダイレクトに projectId が含まれない場合は metadata/body からフォールバック抽出する
 
 **開発用（Supabase 接続前の確認モード）:**
 - 目的は「新規プロジェクト作成だけ」を先に動作確認すること。既存プロジェクトの open/save は対象外。
@@ -252,29 +279,38 @@ Railway のバックエンド URL はデプロイ完了後に外部へ公開さ�
 ### CSRF トークン対応
 
 OpenRefine 3.5+ は POST に `X-Token` ヘッダーが必要。
-`GET /command/core/get-csrf-token` で取得・キャッシュ。プロキシはそのまま転送。
-
-トークン取得時に返る `Set-Cookie`/`Cookie` ヘッダーはブラウザとのセッションを維持するために透過し、キャッシュも `userId`＋`project` でキーを持たせる。ユーザー共有環境でトークンを共通化すると他人のセッションに使われかねないため、都度トークンとクッキーが一致するかを確認してから POST を転送すること。
+`ensureCsrfHeader()` で `GET /command/core/get-csrf-token` を都度取得し、`X-Token` を付与して POST/PUT/PATCH/DELETE を転送する。CSRF 取得時の Cookie は許可リストに基づいて転送する。
 
 ### frontend/.env.example
 
 ```bash
-# Supabase（既存の値を使用）
+# Supabase
 NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbG...
 
-# Railway OpenRefine バックエンド（サーバー専用・ブラウザには非公開）
+# OpenRefine backend on Railway
 OPENREFINE_BACKEND_URL=https://openrefine-xxx.up.railway.app
 
-# Railway 直アクセス防止（Railway 側と同じ値）
-OPENREFINE_SHARED_SECRET=your-shared-secret-here
+# Required for Vercel -> Railway protection
+OPENREFINE_SHARED_SECRET=replace-with-long-random-secret
 
-# Cron 認証（openssl rand -hex 32 で生成）
-CRON_SECRET=your-secret-here
+# Vercel cron auth
+CRON_SECRET=replace-with-random-secret
 
-# オプション
+# Optional tuning
 MAX_UPLOAD_SIZE_MB=100
 MAX_PROJECT_AGE_HOURS=24
+
+# Local-only: allow project creation without Supabase token on /api/refine/upload
+ALLOW_ANON_PROJECT_CREATE=false
+DEV_FALLBACK_USER_ID=local-dev-user
+
+# Local-only: allow browsing built-in OpenRefine UI without Supabase token on /openrefine/*
+ALLOW_ANON_OPENREFINE_UI=false
+
+# Default UI locale for proxied OpenRefine pages
+OPENREFINE_DEFAULT_ACCEPT_LANGUAGE=ja-JP,ja;q=0.9,en;q=0.7
+# OPENREFINE_DEFAULT_UI_LANG=ja
 ```
 
 ### Vercel 環境変数
@@ -288,6 +324,11 @@ MAX_PROJECT_AGE_HOURS=24
 | `CRON_SECRET` | `openssl rand -hex 32` | Cron 認証 |
 | `MAX_UPLOAD_SIZE_MB` | `100` | |
 | `MAX_PROJECT_AGE_HOURS` | `24` | |
+| `ALLOW_ANON_PROJECT_CREATE` | `false`（本番） | upload ルート限定の匿名作成モード |
+| `DEV_FALLBACK_USER_ID` | `local-dev-user`（開発のみ） | 匿名作成時の owner 文字列 |
+| `ALLOW_ANON_OPENREFINE_UI` | `false`（本番） | `/openrefine/*` 未認証閲覧許可 |
+| `OPENREFINE_DEFAULT_ACCEPT_LANGUAGE` | `ja-JP,ja;q=0.9,en;q=0.7` | OpenRefine UI の既定言語優先度 |
+| `OPENREFINE_DEFAULT_UI_LANG` | `ja`（任意） | `load-language` の `lang` 強制指定 |
 
 ---
 
@@ -297,15 +338,16 @@ MAX_PROJECT_AGE_HOURS=24
 
 ```
 1.  ユーザーが CSV を選択
-2.  POST /api/refine/upload  (x-project-name: {userId}_{ts}_{rand})
-3.  Railway: POST /command/core/create-project-from-upload?projectName=...
-4.  OpenRefine がプロジェクト作成 → /project?project={numericId} にリダイレクト
-5.  numericId を抽出して返却
-6.  ブラウザが projectId を state に保持
-7.  DataTable: GET /api/refine/get-rows?project={numericId}
-8.  変換: POST /api/refine/apply-operations?project={numericId}
-9.  エクスポート: GET /api/refine/export-rows?project={numericId}&format=csv
-10. ページ離脱: sendBeacon('/api/refine/cleanup', {projectId}) → DELETE
+2.  POST /api/refine/upload
+3.  サーバー側で `projectName={userId}_{ts}_{rand}` を生成
+4.  Railway: POST /command/core/create-project-from-upload?projectName=...
+5.  OpenRefine がプロジェクト作成 → /project?project={numericId} にリダイレクト
+6.  numericId を抽出して返却（失敗時は metadata/body からフォールバック）
+7.  ブラウザが projectId を state に保持
+8.  DataTable: GET /api/refine/get-rows?project={numericId}
+9.  変換: POST /api/refine/apply-operations?project={numericId}
+10. エクスポート: GET /api/refine/export-rows?project={numericId}&format=csv
+11. ページ離脱: sendBeacon('/api/refine/cleanup', {projectId}) → DELETE
 ```
 
 ### 孤立プロジェクト定期クリーンアップ
@@ -332,7 +374,7 @@ MAX_PROJECT_AGE_HOURS=24
 1. GitHub リポジトリを Railway に接続
 2. サービスのルートディレクトリを `backend/` に指定
 3. Railway が Dockerfile を自動検出してビルド（初回 5〜10 分）
-4. 環境変数 `REFINE_MEMORY=1400M` を設定
+4. 環境変数 `REFINE_MEMORY=1400M` と `OPENREFINE_SHARED_SECRET=<64文字ランダム文字列>` を設定
 5. 生成された URL をメモ（例: `https://openrefine-xxx.up.railway.app`）
 
 ### Step 2: Vercel へフロントエンドをデプロイ
@@ -345,11 +387,19 @@ MAX_PROJECT_AGE_HOURS=24
 ### Step 3: 動作確認
 
 ```bash
-# Railway バックエンドの疎通確認
-curl https://openrefine-xxx.up.railway.app/command/core/get-all-project-metadata
+# Railway バックエンド: ヘッダーなしは 403（想定）
+curl -i https://openrefine-xxx.up.railway.app/command/core/get-all-project-metadata
 
-# 未認証アクセスが 401 になることを確認
+# Railway バックエンド: 共有シークレット付きで 200
+curl -H "x-openrefine-proxy-secret: <OPENREFINE_SHARED_SECRET>" \
+  https://openrefine-xxx.up.railway.app/command/core/get-all-project-metadata
+
+# Vercel API: 未認証アクセスが 401 になることを確認
 curl https://your-app.vercel.app/api/refine/get-all-project-metadata
+
+# 匿名作成モード有効時の新規作成テスト（upload のみ）
+curl -i -F "project-file=@/absolute/path/to/sample.csv" \
+  https://your-app.vercel.app/api/refine/upload
 ```
 
 ---
