@@ -52,14 +52,59 @@ type RouteContext = {
   params: { path?: string[] };
 };
 
+function resolveDefaultOpenRefineLang(): string {
+  const explicit = process.env.OPENREFINE_DEFAULT_UI_LANG?.trim();
+  if (explicit) {
+    return explicit;
+  }
+
+  const acceptLanguage = process.env.OPENREFINE_DEFAULT_ACCEPT_LANGUAGE?.trim();
+  if (acceptLanguage) {
+    const firstToken = acceptLanguage.split(",")[0]?.trim();
+    if (firstToken) {
+      const normalized = firstToken.split(";")[0]?.trim();
+      if (normalized) {
+        return normalized.split(/[-_]/)[0] ?? "ja";
+      }
+    }
+  }
+
+  return "ja";
+}
+
+async function buildRequestBodyForCommand(
+  request: Request,
+  method: string,
+  command: string
+): Promise<string | ArrayBuffer | undefined> {
+  if (method === "GET" || method === "HEAD") {
+    return undefined;
+  }
+
+  if (method === "POST" && command === "load-language") {
+    const contentType = request.headers.get("content-type") ?? "";
+    if (contentType.includes("application/x-www-form-urlencoded")) {
+      const rawBody = await request.text();
+      const params = new URLSearchParams(rawBody);
+      if (!params.has("lang")) {
+        params.set("lang", resolveDefaultOpenRefineLang());
+      }
+      return params.toString();
+    }
+  }
+
+  return request.arrayBuffer();
+}
+
 async function proxy(request: Request, context: RouteContext): Promise<Response> {
   try {
     await authorize(request);
     const targetUrl = buildTargetUrl(context.params.path, request.url);
     const method = request.method.toUpperCase();
+    const command = context.params.path?.[context.params.path.length - 1] ?? "";
     const headers = buildBackendHeaders(request);
     await ensureCsrfHeader(request, headers, method);
-    const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
+    const body = await buildRequestBodyForCommand(request, method, command);
 
     const upstream = await fetch(targetUrl, {
       method,
