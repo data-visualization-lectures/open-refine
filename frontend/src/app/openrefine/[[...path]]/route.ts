@@ -100,6 +100,10 @@ function injectBaseHref(html: string): string {
   return html.replace("<head>", '<head>\n  <base href="/openrefine/">');
 }
 
+function rewriteHomeButtonHref(html: string): string {
+  return html.replace(/(<a[^>]*id=["']app-home-button["'][^>]*href=["'])\.\/(["'][^>]*>)/i, "$1/$2");
+}
+
 function isRootOpenRefinePath(pathSegments: string[] | undefined): boolean {
   return !pathSegments || pathSegments.length === 0;
 }
@@ -382,7 +386,8 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
 
     if (isHtml) {
       const html = await upstream.text();
-      const rewrittenHtml = isRootOpenRefinePath(params.path) ? injectBaseHref(html) : html;
+      const withBase = isRootOpenRefinePath(params.path) ? injectBaseHref(html) : html;
+      const rewrittenHtml = rewriteHomeButtonHref(withBase);
       return new Response(rewrittenHtml, {
         status: upstream.status,
         statusText: upstream.statusText,
