@@ -1,7 +1,7 @@
 import { ApiError } from "@/lib/api-error";
 import { requireAuthenticatedUser } from "@/lib/auth";
 import { createOpenRefineSavedProject, deleteOpenRefineStorageObject, uploadOpenRefineArchive } from "@/lib/openrefine-storage";
-import { projectBelongsTo } from "@/lib/project-registry";
+import { projectBelongsTo, registerProject } from "@/lib/project-registry";
 import { parseMaxUploadSizeMb, sanitizeOpenRefineCookieHeader } from "@/lib/proxy";
 
 export const runtime = "nodejs";
@@ -154,6 +154,32 @@ function renderAlertRedirectPage(message: string, targetUrl: string, status = 20
   });
 }
 
+type ProjectMetadataResponse = {
+  name?: string;
+};
+
+async function resolveOwnedProjectNameFromBackend(request: Request, projectId: string): Promise<string | null> {
+  const backendBase = requireEnv("OPENREFINE_BACKEND_URL");
+  const metadataUrl = new URL("/command/core/get-project-metadata", backendBase);
+  metadataUrl.searchParams.set("project", projectId);
+
+  const headers = buildProxyHeaders(request);
+  headers.delete("content-type");
+
+  const response = await fetch(metadataUrl, {
+    method: "GET",
+    headers,
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    return null;
+  }
+
+  const metadata = (await response.json()) as ProjectMetadataResponse;
+  const name = metadata.name?.trim() ?? "";
+  return name || null;
+}
+
 async function exportArchiveFromOpenRefine(
   request: Request,
   pathSegments: string[],
@@ -214,7 +240,11 @@ async function handleSupabaseProjectSaveFromExport(
       throw new ApiError(400, "プロジェクトIDの取得に失敗しました。");
     }
     if (!projectBelongsTo(openrefineProjectId, user.id)) {
-      throw new ApiError(403, "このプロジェクトを保存する権限がありません。");
+      const resolvedName = await resolveOwnedProjectNameFromBackend(request, openrefineProjectId);
+      if (!resolvedName) {
+        throw new ApiError(403, "このプロジェクトを保存する権限がありません。");
+      }
+      registerProject(openrefineProjectId, user.id, resolvedName);
     }
     if (!pathSegments || pathSegments.length < 4) {
       throw new ApiError(400, "export-project path is invalid");
