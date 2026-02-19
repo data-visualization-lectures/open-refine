@@ -50,21 +50,15 @@ function buildTargetUrl(pathSegments: string[] | undefined, requestUrl: string):
 function buildProxyHeaders(request: Request): Headers {
   const headers = new Headers();
 
-  headers.set("accept", request.headers.get("accept") ?? "*/*");
-
-  const contentType = request.headers.get("content-type");
-  if (contentType) {
-    headers.set("content-type", contentType);
-  }
-
-  const cookie = request.headers.get("cookie");
-  if (cookie) {
-    headers.set("cookie", cookie);
-  }
-
-  const xToken = request.headers.get("x-token");
-  if (xToken) {
-    headers.set("x-token", xToken);
+  for (const [key, value] of request.headers.entries()) {
+    const lowered = key.toLowerCase();
+    if (lowered === "host" || lowered === "connection" || lowered === "content-length" || lowered === "accept-encoding") {
+      continue;
+    }
+    if (lowered === "x-openrefine-proxy-secret") {
+      continue;
+    }
+    headers.set(key, value);
   }
 
   headers.set("x-openrefine-proxy-secret", requireEnv("OPENREFINE_SHARED_SECRET"));
