@@ -20,6 +20,55 @@ function parseProjectId(raw: string | null): string | null {
   return match?.[1] ?? null;
 }
 
+function parseProjectIdFromJson(raw: string): string | null {
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const candidates = [parsed.project, parsed.projectID, parsed.projectId];
+    for (const candidate of candidates) {
+      if (typeof candidate === "number" && Number.isFinite(candidate)) {
+        return String(candidate);
+      }
+      if (typeof candidate === "string") {
+        const direct = candidate.match(/^\d+$/)?.[0];
+        if (direct) {
+          return direct;
+        }
+        const nested = parseProjectId(candidate);
+        if (nested) {
+          return nested;
+        }
+      }
+    }
+  } catch {
+    // Not JSON; caller will try other parsers.
+  }
+  return null;
+}
+
+function parseProjectIdFromBody(raw: string): string | null {
+  const fromQuery = parseProjectId(raw);
+  if (fromQuery) {
+    return fromQuery;
+  }
+
+  const fromJson = parseProjectIdFromJson(raw);
+  if (fromJson) {
+    return fromJson;
+  }
+
+  const fromPath = raw.match(/\/project\?project=(\d+)/)?.[1];
+  if (fromPath) {
+    return fromPath;
+  }
+
+  const fromProjectKey = raw.match(/"project(?:ID|Id)?"\s*:\s*"?(?<id>\d+)"?/)?.groups?.id;
+  if (fromProjectKey) {
+    return fromProjectKey;
+  }
+
+  return null;
+}
+
 function allowAnonymousProjectCreate(): boolean {
   return process.env.ALLOW_ANON_PROJECT_CREATE === "true";
 }
@@ -76,13 +125,15 @@ export async function POST(request: Request): Promise<Response> {
     });
 
     const location = backendResponse.headers.get("location");
-    const projectId = parseProjectId(location);
+    const projectIdFromLocation = parseProjectId(location);
+    const projectIdFromFinalUrl = parseProjectId(backendResponse.url);
+    const projectId = projectIdFromLocation ?? projectIdFromFinalUrl;
     if (!backendResponse.ok && backendResponse.status !== 302) {
       return relayBackendResponse(backendResponse);
     }
     if (!projectId) {
       const fallbackBody = await backendResponse.text();
-      const fallbackProjectId = parseProjectId(fallbackBody);
+      const fallbackProjectId = parseProjectIdFromBody(fallbackBody);
       if (fallbackProjectId) {
         registerProject(fallbackProjectId, user.id, projectName);
 
