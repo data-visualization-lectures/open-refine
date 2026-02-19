@@ -1,5 +1,7 @@
 import { ApiError } from "@/lib/api-error";
-import { requireAuthenticatedUser } from "@/lib/auth";
+import { type AuthenticatedUser, requireAuthenticatedUser } from "@/lib/auth";
+import { downloadOpenRefineArchive, listOpenRefineSavedProjects, type OpenRefineSavedProject } from "@/lib/openrefine-storage";
+import { registerProject } from "@/lib/project-registry";
 import { buildBackendHeaders, ensureCsrfHeader } from "@/lib/proxy";
 
 export const runtime = "nodejs";
@@ -16,6 +18,14 @@ const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
   "upgrade"
 ]);
 
+const CLOUD_SYNC_THROTTLE_MS = 30 * 1000;
+
+type SyncThrottleStore = Map<string, number>;
+
+declare global {
+  var __openRefineCloudSyncThrottle__: SyncThrottleStore | undefined;
+}
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -24,16 +34,34 @@ function requireEnv(name: string): string {
   return value;
 }
 
+function getSyncThrottleStore(): SyncThrottleStore {
+  if (!globalThis.__openRefineCloudSyncThrottle__) {
+    globalThis.__openRefineCloudSyncThrottle__ = new Map<string, number>();
+  }
+  return globalThis.__openRefineCloudSyncThrottle__;
+}
+
+function shouldRunCloudSync(userId: string): boolean {
+  const store = getSyncThrottleStore();
+  const now = Date.now();
+  const last = store.get(userId) ?? 0;
+  if (now - last < CLOUD_SYNC_THROTTLE_MS) {
+    return false;
+  }
+  store.set(userId, now);
+  return true;
+}
+
 function allowAnonymousUiProxy(): boolean {
   return process.env.ALLOW_ANON_OPENREFINE_UI === "true" || process.env.ALLOW_ANON_PROJECT_CREATE === "true";
 }
 
-async function authorize(request: Request): Promise<void> {
+async function authorize(request: Request): Promise<AuthenticatedUser | null> {
   try {
-    await requireAuthenticatedUser(request);
+    return await requireAuthenticatedUser(request);
   } catch (error) {
     if (allowAnonymousUiProxy() && error instanceof ApiError && error.status === 401) {
-      return;
+      return null;
     }
     throw error;
   }
@@ -50,6 +78,15 @@ function buildTargetUrl(pathSegments: string[] | undefined, requestUrl: string):
 
 type RouteContext = {
   params: { path?: string[] };
+};
+
+type AllMetadataResponse = {
+  projects?: Record<
+    string,
+    {
+      name?: string;
+    }
+  >;
 };
 
 function resolveDefaultOpenRefineLang(): string {
@@ -96,12 +133,161 @@ async function buildRequestBodyForCommand(
   return request.arrayBuffer();
 }
 
+function makeCloudSyncProjectName(saved: OpenRefineSavedProject): string {
+  const base = saved.name.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+  const safeBase = base.replace(/[<>\\/:|?*]/g, " ").replace(/\s+/g, " ").trim();
+  const shortId = saved.id.slice(0, 8);
+  const head = (safeBase || "OpenRefine Project").slice(0, 96).trim();
+  return `${head} [cloud:${shortId}]`;
+}
+
+function parseProjectId(raw: string | null): string | null {
+  if (!raw) {
+    return null;
+  }
+  const match = raw.match(/project=(\d+)/);
+  return match?.[1] ?? null;
+}
+
+function parseProjectIdFromBody(raw: string): string | null {
+  const fromQuery = parseProjectId(raw);
+  if (fromQuery) {
+    return fromQuery;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const candidates = [parsed.project, parsed.projectID, parsed.projectId];
+    for (const candidate of candidates) {
+      if (typeof candidate === "number" && Number.isFinite(candidate)) {
+        return String(candidate);
+      }
+      if (typeof candidate === "string") {
+        if (/^\d+$/.test(candidate)) {
+          return candidate;
+        }
+        const nested = parseProjectId(candidate);
+        if (nested) {
+          return nested;
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return raw.match(/\/project\?project=(\d+)/)?.[1] ?? null;
+}
+
+async function fetchAllProjectMetadata(request: Request): Promise<AllMetadataResponse> {
+  const backendBase = requireEnv("OPENREFINE_BACKEND_URL");
+  const url = new URL("/command/core/get-all-project-metadata", backendBase);
+  const headers = buildBackendHeaders(request);
+  headers.delete("content-type");
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers,
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    const reason = await response.text();
+    throw new ApiError(response.status, `Failed to fetch project metadata: ${reason}`);
+  }
+  return (await response.json()) as AllMetadataResponse;
+}
+
+async function importArchiveToOpenRefine(
+  request: Request,
+  archive: ArrayBuffer,
+  projectName: string
+): Promise<string | null> {
+  const backendBase = requireEnv("OPENREFINE_BACKEND_URL");
+  const backendUrl = new URL("/command/core/import-project", backendBase);
+  const headers = buildBackendHeaders(request);
+  await ensureCsrfHeader(request, headers, "POST");
+  const csrfToken = headers.get("x-token");
+  if (csrfToken) {
+    backendUrl.searchParams.set("csrf_token", csrfToken);
+  }
+  headers.delete("content-type");
+
+  const form = new FormData();
+  form.append("project-file", new Blob([archive], { type: "application/gzip" }), `${projectName}.openrefine.tar.gz`);
+  form.append("project-name", projectName);
+
+  const response = await fetch(backendUrl, {
+    method: "POST",
+    headers,
+    body: form,
+    redirect: "manual",
+    cache: "no-store"
+  });
+  if (!response.ok && response.status !== 302) {
+    const reason = await response.text();
+    throw new ApiError(response.status, `OpenRefine import-project failed: ${reason}`);
+  }
+
+  const fromLocation = parseProjectId(response.headers.get("location"));
+  const fromUrl = parseProjectId(response.url);
+  if (fromLocation || fromUrl) {
+    return fromLocation ?? fromUrl;
+  }
+
+  const body = await response.text();
+  return parseProjectIdFromBody(body);
+}
+
+async function syncCloudProjectsToOpenRefineIfNeeded(request: Request, user: AuthenticatedUser): Promise<void> {
+  if (!shouldRunCloudSync(user.id)) {
+    return;
+  }
+
+  const savedProjects = await listOpenRefineSavedProjects(user.accessToken, user.id);
+  if (!savedProjects.length) {
+    return;
+  }
+
+  const metadata = await fetchAllProjectMetadata(request);
+  const existingNames = new Set<string>();
+  for (const project of Object.values(metadata.projects ?? {})) {
+    const name = project?.name?.trim();
+    if (name) {
+      existingNames.add(name);
+    }
+  }
+
+  let imported = 0;
+  const maxImportsPerSync = 3;
+  for (const saved of savedProjects) {
+    const syncName = makeCloudSyncProjectName(saved);
+    if (existingNames.has(syncName)) {
+      continue;
+    }
+    const archive = await downloadOpenRefineArchive(user.accessToken, saved.archivePath);
+    const importedProjectId = await importArchiveToOpenRefine(request, archive, syncName);
+    if (importedProjectId) {
+      registerProject(importedProjectId, user.id, syncName);
+    }
+    existingNames.add(syncName);
+    imported += 1;
+    if (imported >= maxImportsPerSync) {
+      break;
+    }
+  }
+}
+
 async function proxy(request: Request, context: RouteContext): Promise<Response> {
   try {
-    await authorize(request);
+    const user = await authorize(request);
     const targetUrl = buildTargetUrl(context.params.path, request.url);
     const method = request.method.toUpperCase();
     const command = context.params.path?.[context.params.path.length - 1] ?? "";
+
+    if (user && method === "GET" && command === "get-all-project-metadata") {
+      await syncCloudProjectsToOpenRefineIfNeeded(request, user);
+    }
+
     const headers = buildBackendHeaders(request);
     await ensureCsrfHeader(request, headers, method);
     const body = await buildRequestBodyForCommand(request, method, command);
