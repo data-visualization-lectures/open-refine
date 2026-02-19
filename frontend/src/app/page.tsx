@@ -1,5 +1,5 @@
-import EditorPage from "@/app/app/editor/page";
+import { redirect } from "next/navigation";
 
 export default function HomePage() {
-  return <EditorPage />;
+  redirect("/openrefine/");
 }
