@@ -102,12 +102,63 @@ function isRootOpenRefinePath(pathSegments: string[] | undefined): boolean {
   return !pathSegments || pathSegments.length === 0;
 }
 
+function resolveDefaultOpenRefineLang(): string {
+  const explicit = process.env.OPENREFINE_DEFAULT_UI_LANG?.trim();
+  if (explicit) {
+    return explicit;
+  }
+
+  const acceptLanguage = process.env.OPENREFINE_DEFAULT_ACCEPT_LANGUAGE?.trim();
+  if (acceptLanguage) {
+    const firstToken = acceptLanguage.split(",")[0]?.trim();
+    if (firstToken) {
+      const normalized = firstToken.split(";")[0]?.trim();
+      if (normalized) {
+        return normalized.split(/[-_]/)[0] ?? "ja";
+      }
+    }
+  }
+
+  return "ja";
+}
+
+function isLoadLanguageCommand(pathSegments: string[] | undefined): boolean {
+  if (!pathSegments || pathSegments.length < 3) {
+    return false;
+  }
+  return pathSegments[0] === "command" && pathSegments[1] === "core" && pathSegments[2] === "load-language";
+}
+
+async function buildOpenRefineProxyBody(
+  request: Request,
+  method: string,
+  pathSegments: string[] | undefined
+): Promise<string | ArrayBuffer | undefined> {
+  if (method === "GET" || method === "HEAD") {
+    return undefined;
+  }
+
+  if (method === "POST" && isLoadLanguageCommand(pathSegments)) {
+    const contentType = request.headers.get("content-type") ?? "";
+    if (contentType.includes("application/x-www-form-urlencoded")) {
+      const rawBody = await request.text();
+      const params = new URLSearchParams(rawBody);
+      if (!params.has("lang")) {
+        params.set("lang", resolveDefaultOpenRefineLang());
+      }
+      return params.toString();
+    }
+  }
+
+  return request.arrayBuffer();
+}
+
 async function proxy(request: Request, params: { path?: string[] }): Promise<Response> {
   try {
     await authorizeOpenRefineUi(request);
     const targetUrl = buildTargetUrl(params.path, request.url);
     const method = request.method.toUpperCase();
-    const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
+    const body = await buildOpenRefineProxyBody(request, method, params.path);
 
     const upstream = await fetch(targetUrl, {
       method,
