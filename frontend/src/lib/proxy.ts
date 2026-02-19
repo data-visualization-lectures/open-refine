@@ -35,6 +35,13 @@ const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
   "upgrade"
 ]);
 
+const OPENREFINE_COOKIE_ALLOW_LIST = [
+  /^JSESSIONID$/i,
+  /^host$/i,
+  /^refine\./i,
+  /^csrf/i
+];
+
 function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -98,11 +105,40 @@ export function buildBackendHeaders(request: Request): Headers {
   }
 
   const cookie = request.headers.get("cookie");
-  if (cookie) {
-    headers.set("cookie", cookie);
+  const filteredCookie = sanitizeOpenRefineCookieHeader(cookie);
+  if (filteredCookie) {
+    headers.set("cookie", filteredCookie);
   }
 
   return headers;
+}
+
+export function sanitizeOpenRefineCookieHeader(rawCookie: string | null): string | null {
+  if (!rawCookie) {
+    return null;
+  }
+
+  const allowedPairs: string[] = [];
+  for (const token of rawCookie.split(";")) {
+    const trimmed = token.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const eqIndex = trimmed.indexOf("=");
+    if (eqIndex <= 0) {
+      continue;
+    }
+    const name = trimmed.slice(0, eqIndex).trim();
+    if (OPENREFINE_COOKIE_ALLOW_LIST.some((pattern) => pattern.test(name))) {
+      allowedPairs.push(trimmed);
+    }
+  }
+
+  if (allowedPairs.length === 0) {
+    return null;
+  }
+
+  return allowedPairs.join("; ");
 }
 
 function parseCsrfToken(rawBody: string): string | null {

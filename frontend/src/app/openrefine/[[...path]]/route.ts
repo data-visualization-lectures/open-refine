@@ -1,5 +1,6 @@
 import { ApiError } from "@/lib/api-error";
 import { requireAuthenticatedUser } from "@/lib/auth";
+import { sanitizeOpenRefineCookieHeader } from "@/lib/proxy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -58,7 +59,15 @@ function buildProxyHeaders(request: Request): Headers {
     if (lowered === "x-openrefine-proxy-secret") {
       continue;
     }
+    if (lowered === "cookie") {
+      continue;
+    }
     headers.set(key, value);
+  }
+
+  const filteredCookie = sanitizeOpenRefineCookieHeader(request.headers.get("cookie"));
+  if (filteredCookie) {
+    headers.set("cookie", filteredCookie);
   }
 
   headers.set("x-openrefine-proxy-secret", requireEnv("OPENREFINE_SHARED_SECRET"));
