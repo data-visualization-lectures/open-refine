@@ -55,17 +55,20 @@ openrefine/
         │   │   ├── layout.tsx         # Auth guard
         │   │   └── editor/
         │   │       └── page.tsx       # メインエディタ
-        │   └── api/
-        │       ├── refine/
-        │       │   ├── [...path]/
-        │       │   │   └── route.ts   # 認証プロキシ（最重要）
-        │       │   ├── upload/
-        │       │   │   └── route.ts   # ファイルアップロード
-        │       │   └── cleanup/
-        │       │       └── route.ts   # Beacon API 用
-        │       └── cron/
-        │           └── cleanup-orphans/
-        │               └── route.ts
+        │   ├── api/
+        │   │   ├── refine/
+        │   │   │   ├── [...path]/
+        │   │   │   │   └── route.ts   # 認証プロキシ（最重要）
+        │   │   │   ├── upload/
+        │   │   │   │   └── route.ts   # ファイルアップロード
+        │   │   │   └── cleanup/
+        │   │   │       └── route.ts   # Beacon API 用
+        │   │   └── cron/
+        │   │       └── cleanup-orphans/
+        │   │           └── route.ts
+        │   └── openrefine/
+        │       └── [[...path]]/
+        │           └── route.ts       # 元OpenRefine UIプロキシ
         ├── components/
         │   ├── DataTable.tsx
         │   ├── TransformPanel.tsx
@@ -224,6 +227,12 @@ function userOwnsProject(userId: string, projectName: string): boolean {
 ### Railway 直アクセス制御
 
 Railway のバックエンド URL はデプロイ完了後に外部へ公開されるので、そのまま OpenRefine を叩かれると Supabase 認証／プロキシ／所有権ロジックが効かなくなる。Railway 側で Vercel からのリクエストしか受け付けない共有シークレットヘッダーや IP 制限を追加するか、Vercel が HMAC シグネチャを付与して携帯情報を検証できる仕組みを併用し、直接アクセスを拒否することを想定する。
+
+### 元 OpenRefine UI の公開（プロキシ経由）
+
+`/openrefine/*` を Next.js Route Handler で Railway に透過し、`x-openrefine-proxy-secret` をサーバー側で付与して元 UI（`wirings.js` / `index-bundle.js` / `styles/*` など）をそのまま配信する。Railway 直リンクは使わず、ブラウザからは常に Vercel 経由でアクセスする。
+
+開発中に Supabase 接続前で UI を確認したい場合のみ `ALLOW_ANON_OPENREFINE_UI=true` を使い、`/openrefine/*` への未認証アクセスを許可する。本番では `false` に戻す。
 
 ### ファイルアップロード専用ルート
 

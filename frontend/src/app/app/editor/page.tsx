@@ -60,6 +60,15 @@ export default function EditorPage() {
     <main style={{ maxWidth: 1080, margin: "0 auto", padding: 24, display: "grid", gap: 12 }}>
       <h1 style={{ marginBottom: 8 }}>OpenRefine Editor</h1>
       <section style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, background: "#fff" }}>
+        <h2 style={{ marginTop: 0 }}>Original OpenRefine UI</h2>
+        <p style={{ marginTop: 0 }}>
+          Open the built-in OpenRefine interface via proxy:{" "}
+          <a href="/openrefine/" target="_blank" rel="noreferrer">
+            /openrefine/
+          </a>
+        </p>
+      </section>
+      <section style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, background: "#fff" }}>
         <h2 style={{ marginTop: 0 }}>Create Project (CSV)</h2>
         <form onSubmit={onCreateProject} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <input name="csvFile" type="file" accept=".csv,text/csv" />
