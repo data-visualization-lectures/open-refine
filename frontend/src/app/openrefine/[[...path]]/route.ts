@@ -48,10 +48,25 @@ function buildTargetUrl(pathSegments: string[] | undefined, requestUrl: string):
 }
 
 function buildProxyHeaders(request: Request): Headers {
-  const headers = new Headers(request.headers);
-  headers.delete("host");
-  headers.delete("connection");
-  headers.delete("content-length");
+  const headers = new Headers();
+
+  headers.set("accept", request.headers.get("accept") ?? "*/*");
+
+  const contentType = request.headers.get("content-type");
+  if (contentType) {
+    headers.set("content-type", contentType);
+  }
+
+  const cookie = request.headers.get("cookie");
+  if (cookie) {
+    headers.set("cookie", cookie);
+  }
+
+  const xToken = request.headers.get("x-token");
+  if (xToken) {
+    headers.set("x-token", xToken);
+  }
+
   headers.set("x-openrefine-proxy-secret", requireEnv("OPENREFINE_SHARED_SECRET"));
   return headers;
 }
@@ -105,6 +120,9 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
         continue;
       }
       if (lowered === "content-length") {
+        continue;
+      }
+      if (lowered === "content-encoding") {
         continue;
       }
       headers.append(key, value);
