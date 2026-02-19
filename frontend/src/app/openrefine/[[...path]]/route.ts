@@ -1,6 +1,8 @@
 import { ApiError } from "@/lib/api-error";
 import { requireAuthenticatedUser } from "@/lib/auth";
-import { sanitizeOpenRefineCookieHeader } from "@/lib/proxy";
+import { createOpenRefineSavedProject, deleteOpenRefineStorageObject, uploadOpenRefineArchive } from "@/lib/openrefine-storage";
+import { projectBelongsTo } from "@/lib/project-registry";
+import { parseMaxUploadSizeMb, sanitizeOpenRefineCookieHeader } from "@/lib/proxy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -102,6 +104,156 @@ function isRootOpenRefinePath(pathSegments: string[] | undefined): boolean {
   return !pathSegments || pathSegments.length === 0;
 }
 
+function isExportProjectCommand(pathSegments: string[] | undefined): boolean {
+  if (!pathSegments || pathSegments.length < 4) {
+    return false;
+  }
+  return pathSegments[0] === "command" && pathSegments[1] === "core" && pathSegments[2] === "export-project";
+}
+
+function normalizeSavedProjectName(exportFileSegment: string): string {
+  const decoded = decodeURIComponent(exportFileSegment);
+  const withoutArchiveExt = decoded.replace(/\.openrefine\.tar\.gz$/i, "").replace(/\.tar\.gz$/i, "").trim();
+  if (withoutArchiveExt) {
+    return withoutArchiveExt;
+  }
+  return "OpenRefine Project";
+}
+
+function resolveBackUrl(request: Request, openrefineProjectId: string | null): string {
+  const referer = request.headers.get("referer");
+  if (referer) {
+    return referer;
+  }
+  if (openrefineProjectId) {
+    return `/openrefine/project?project=${encodeURIComponent(openrefineProjectId)}`;
+  }
+  return "/openrefine/";
+}
+
+function renderAlertRedirectPage(message: string, targetUrl: string, status = 200): Response {
+  const safeMessage = JSON.stringify(message);
+  const safeTargetUrl = JSON.stringify(targetUrl);
+  const html = `<!doctype html>
+<html lang="ja">
+  <head><meta charset="utf-8"><title>OpenRefine</title></head>
+  <body>
+    <script>
+      alert(${safeMessage});
+      window.location.replace(${safeTargetUrl});
+    </script>
+  </body>
+</html>`;
+
+  return new Response(html, {
+    status,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store"
+    }
+  });
+}
+
+async function exportArchiveFromOpenRefine(
+  request: Request,
+  pathSegments: string[],
+  formBody: string
+): Promise<ArrayBuffer> {
+  const targetUrl = buildTargetUrl(pathSegments, request.url);
+  const headers = buildProxyHeaders(request);
+  headers.set("content-type", "application/x-www-form-urlencoded;charset=UTF-8");
+
+  let upstream = await fetch(targetUrl, {
+    method: "POST",
+    headers,
+    body: formBody,
+    redirect: "manual",
+    cache: "no-store"
+  });
+
+  const isRedirect = upstream.status >= 300 && upstream.status < 400;
+  const redirectLocation = upstream.headers.get("location");
+  if (isRedirect && redirectLocation) {
+    const backendBase = requireEnv("OPENREFINE_BACKEND_URL");
+    const downloadUrl = new URL(redirectLocation, backendBase);
+    const downloadHeaders = new Headers(headers);
+    downloadHeaders.delete("content-type");
+
+    upstream = await fetch(downloadUrl, {
+      method: "GET",
+      headers: downloadHeaders,
+      cache: "no-store"
+    });
+  }
+
+  if (!upstream.ok) {
+    const reason = await upstream.text();
+    throw new ApiError(upstream.status, `OpenRefine export-project failed: ${reason}`);
+  }
+
+  const archive = await upstream.arrayBuffer();
+  if (!archive.byteLength) {
+    throw new ApiError(502, "OpenRefine export-project returned empty archive");
+  }
+  return archive;
+}
+
+async function handleSupabaseProjectSaveFromExport(
+  request: Request,
+  pathSegments: string[] | undefined
+): Promise<Response> {
+  const formBody = await request.text();
+  const form = new URLSearchParams(formBody);
+  const openrefineProjectId = form.get("project");
+  const backUrl = resolveBackUrl(request, openrefineProjectId);
+
+  try {
+    const user = await requireAuthenticatedUser(request);
+
+    if (!openrefineProjectId || !/^\d+$/.test(openrefineProjectId)) {
+      throw new ApiError(400, "プロジェクトIDの取得に失敗しました。");
+    }
+    if (!projectBelongsTo(openrefineProjectId, user.id)) {
+      throw new ApiError(403, "このプロジェクトを保存する権限がありません。");
+    }
+    if (!pathSegments || pathSegments.length < 4) {
+      throw new ApiError(400, "export-project path is invalid");
+    }
+
+    const exportFileSegment = pathSegments.slice(3).join("/");
+    const projectName = normalizeSavedProjectName(exportFileSegment);
+    const archive = await exportArchiveFromOpenRefine(request, pathSegments, formBody);
+
+    const maxBytes = parseMaxUploadSizeMb() * 1024 * 1024;
+    if (archive.byteLength > maxBytes) {
+      throw new ApiError(413, "保存対象が MAX_UPLOAD_SIZE_MB を超えています。");
+    }
+
+    const savedProjectId = crypto.randomUUID();
+    const archivePath = `${user.id}/${savedProjectId}/project.tar.gz`;
+
+    await uploadOpenRefineArchive(user.accessToken, archivePath, archive);
+    try {
+      await createOpenRefineSavedProject(user.accessToken, {
+        id: savedProjectId,
+        user_id: user.id,
+        name: projectName,
+        archive_path: archivePath,
+        source_filename: decodeURIComponent(exportFileSegment),
+        size_bytes: archive.byteLength
+      });
+    } catch (error) {
+      await deleteOpenRefineStorageObject(user.accessToken, archivePath).catch(() => undefined);
+      throw error;
+    }
+
+    return renderAlertRedirectPage(`クラウドへ保存しました: ${projectName}`, backUrl, 200);
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : error instanceof Error ? error.message : "Unknown error";
+    return renderAlertRedirectPage(`クラウド保存に失敗しました: ${message}`, backUrl, 500);
+  }
+}
+
 function resolveDefaultOpenRefineLang(): string {
   const explicit = process.env.OPENREFINE_DEFAULT_UI_LANG?.trim();
   if (explicit) {
@@ -158,6 +310,11 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
     await authorizeOpenRefineUi(request);
     const targetUrl = buildTargetUrl(params.path, request.url);
     const method = request.method.toUpperCase();
+
+    if (method === "POST" && isExportProjectCommand(params.path)) {
+      return handleSupabaseProjectSaveFromExport(request, params.path);
+    }
+
     const body = await buildOpenRefineProxyBody(request, method, params.path);
 
     const upstream = await fetch(targetUrl, {
