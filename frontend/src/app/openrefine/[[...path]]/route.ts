@@ -137,6 +137,19 @@ function rewriteHomeButtonHref(html: string): string {
   return html.replace(/(<a[^>]*id=["']app-home-button["'][^>]*href=["'])\.\/(["'][^>]*>)/i, "$1/$2");
 }
 
+function injectAuthScripts(html: string): string {
+  if (html.includes("auth.dataviz.jp/lib/supabase.js")) {
+    return html;
+  }
+  const scripts =
+    '  <script src="https://auth.dataviz.jp/lib/supabase.js"></script>\n' +
+    '  <script src="https://auth.dataviz.jp/lib/dataviz-auth-client.js"></script>';
+  if (html.includes("</head>")) {
+    return html.replace("</head>", `${scripts}\n</head>`);
+  }
+  return html.replace("</body>", `${scripts}\n</body>`);
+}
+
 function isRootOpenRefinePath(pathSegments: string[] | undefined): boolean {
   return !pathSegments || pathSegments.length === 0;
 }
@@ -590,7 +603,8 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
     if (isHtml) {
       const html = await upstream.text();
       const withBase = isRootOpenRefinePath(params.path) ? injectBaseHref(html) : html;
-      const rewrittenHtml = rewriteHomeButtonHref(withBase);
+      const withHomeButton = rewriteHomeButtonHref(withBase);
+      const rewrittenHtml = injectAuthScripts(withHomeButton);
       return new Response(rewrittenHtml, {
         status: upstream.status,
         statusText: upstream.statusText,
