@@ -285,7 +285,10 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
     const command = context.params.path?.[context.params.path.length - 1] ?? "";
 
     if (user && method === "GET" && command === "get-all-project-metadata") {
-      await syncCloudProjectsToOpenRefineIfNeeded(request, user);
+      // Fire-and-forget: do not block the response waiting for cloud sync.
+      syncCloudProjectsToOpenRefineIfNeeded(request, user).catch((syncError) => {
+        console.error("Failed to sync cloud projects for metadata listing", syncError);
+      });
     }
 
     const headers = buildBackendHeaders(request);

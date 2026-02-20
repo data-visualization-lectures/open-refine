@@ -543,11 +543,13 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
     }
 
     if (user && method === "GET" && isGetAllProjectMetadataCommand(params.path)) {
-      try {
-        await syncCloudProjectsToOpenRefineIfNeeded(request, user);
-      } catch (syncError) {
+      // Fire-and-forget: do not block the response waiting for cloud sync.
+      // In Vercel's Node.js runtime the promise may be cut short when the
+      // response is sent, but sync is best-effort and the next page load
+      // will retry after CLOUD_SYNC_THROTTLE_MS anyway.
+      syncCloudProjectsToOpenRefineIfNeeded(request, user).catch((syncError) => {
         console.error("Failed to sync cloud projects for metadata listing", syncError);
-      }
+      });
     }
 
     const body = await buildOpenRefineProxyBody(request, method, params.path);
