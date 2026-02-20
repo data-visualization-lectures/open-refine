@@ -235,6 +235,51 @@ function parseTokenFromSupabaseCookie(request: Request): string | null {
   return null;
 }
 
+function base64UrlToBase64(b64url: string): string {
+  const base64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
+  return base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+}
+
+async function tryVerifyJwtLocally(token: string): Promise<AuthenticatedUser | null> {
+  const jwtSecret = process.env.SUPABASE_JWT_SECRET;
+  if (!jwtSecret) return null;
+
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const [headerB64, payloadB64, sigB64] = parts;
+
+  try {
+    const secretKey = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(jwtSecret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+
+    const sigBytes = Uint8Array.from(atob(base64UrlToBase64(sigB64)), (c) => c.charCodeAt(0));
+    const valid = await crypto.subtle.verify(
+      "HMAC",
+      secretKey,
+      sigBytes,
+      new TextEncoder().encode(`${headerB64}.${payloadB64}`)
+    );
+    if (!valid) return null;
+
+    const payload = JSON.parse(atob(base64UrlToBase64(payloadB64))) as {
+      sub?: string;
+      email?: string;
+      exp?: number;
+    };
+    if (!payload.sub) return null;
+    if (payload.exp && payload.exp * 1000 < Date.now()) return null;
+
+    return { id: payload.sub, accessToken: token, email: payload.email };
+  } catch {
+    return null;
+  }
+}
+
 export async function requireAuthenticatedUser(request: Request): Promise<AuthenticatedUser> {
   const accessToken = parseBearerToken(request) ?? parseTokenFromSupabaseCookie(request);
   if (!accessToken) {
@@ -244,6 +289,12 @@ export async function requireAuthenticatedUser(request: Request): Promise<Authen
   const cached = getCachedUser(accessToken);
   if (cached) {
     return cached;
+  }
+
+  const local = await tryVerifyJwtLocally(accessToken);
+  if (local) {
+    setCachedUser(accessToken, local);
+    return local;
   }
 
   const supabaseUrl = requiredEnvAny(["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL"]);
