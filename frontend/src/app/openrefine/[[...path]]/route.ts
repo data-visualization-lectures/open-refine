@@ -141,13 +141,14 @@ function injectAuthScripts(html: string): string {
   if (html.includes("auth.dataviz.jp/lib/supabase.js")) {
     return html;
   }
-  const scripts =
+  const injection =
+    '  <style>body { padding-top: 48px !important; }</style>\n' +
     '  <script src="https://auth.dataviz.jp/lib/supabase.js"></script>\n' +
     '  <script src="https://auth.dataviz.jp/lib/dataviz-auth-client.js"></script>';
   if (html.includes("</head>")) {
-    return html.replace("</head>", `${scripts}\n</head>`);
+    return html.replace("</head>", `${injection}\n</head>`);
   }
-  return html.replace("</body>", `${scripts}\n</body>`);
+  return html.replace("</body>", `${injection}\n</body>`);
 }
 
 function isRootOpenRefinePath(pathSegments: string[] | undefined): boolean {
