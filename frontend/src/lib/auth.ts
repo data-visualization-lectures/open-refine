@@ -6,6 +6,48 @@ export type AuthenticatedUser = {
   email?: string;
 };
 
+const AUTH_CACHE_TTL_MS = 60 * 1000;
+
+type CachedUser = {
+  user: AuthenticatedUser;
+  expiresAt: number;
+};
+
+declare global {
+  var __authUserCache__: Map<string, CachedUser> | undefined;
+}
+
+function getAuthCache(): Map<string, CachedUser> {
+  if (!globalThis.__authUserCache__) {
+    globalThis.__authUserCache__ = new Map();
+  }
+  return globalThis.__authUserCache__;
+}
+
+function getCachedUser(token: string): AuthenticatedUser | null {
+  const cache = getAuthCache();
+  const entry = cache.get(token);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    cache.delete(token);
+    return null;
+  }
+  return entry.user;
+}
+
+function setCachedUser(token: string, user: AuthenticatedUser): void {
+  const cache = getAuthCache();
+  cache.set(token, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+  if (cache.size > 1000) {
+    const now = Date.now();
+    for (const [key, entry] of cache.entries()) {
+      if (now > entry.expiresAt) {
+        cache.delete(key);
+      }
+    }
+  }
+}
+
 function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -199,6 +241,11 @@ export async function requireAuthenticatedUser(request: Request): Promise<Authen
     throw new ApiError(401, "Missing Supabase access token");
   }
 
+  const cached = getCachedUser(accessToken);
+  if (cached) {
+    return cached;
+  }
+
   const supabaseUrl = requiredEnvAny(["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL"]);
   const supabaseAnonKey = requiredEnvAny([
     "NEXT_PUBLIC_SUPABASE_ANON_KEY",
@@ -224,9 +271,7 @@ export async function requireAuthenticatedUser(request: Request): Promise<Authen
     throw new ApiError(401, "Supabase user does not include id");
   }
 
-  return {
-    id: user.id,
-    accessToken,
-    email: user.email
-  };
+  const result: AuthenticatedUser = { id: user.id, accessToken, email: user.email };
+  setCachedUser(accessToken, result);
+  return result;
 }
