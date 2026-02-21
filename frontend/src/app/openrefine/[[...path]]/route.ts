@@ -143,6 +143,7 @@ function injectAuthScripts(html: string): string {
   }
   const injection =
     '  <style>body { padding-top: 48px !important; }</style>\n' +
+    '  <script>window.DATAVIZ_HEADER_CONFIG = { mode: "public" };</script>\n' +
     '  <script src="https://auth.dataviz.jp/lib/supabase.js"></script>\n' +
     '  <script src="https://auth.dataviz.jp/lib/dataviz-auth-client.js"></script>';
   if (html.includes("</head>")) {
