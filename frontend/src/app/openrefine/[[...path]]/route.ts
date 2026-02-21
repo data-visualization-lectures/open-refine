@@ -141,9 +141,54 @@ function injectAuthScripts(html: string): string {
   if (html.includes("auth.dataviz.jp/lib/supabase.js")) {
     return html;
   }
+
+  // This guard script runs before supabase.js and dataviz-auth-client.js load.
+  // It prevents two known URL-manipulation patterns from disrupting OpenRefine's
+  // Backbone.js hash-based router:
+  //
+  // (1) Supabase implicit grant cleanup: after extracting OAuth tokens from
+  //     "#access_token=…" in the URL, supabase-js calls
+  //     `window.location.hash = ""` which fires a `hashchange` event.
+  //     Backbone responds by re-routing, which appears as a page reload.
+  //     Fix: intercept hashchange in capture phase; if the new hash is empty
+  //     and the old hash held auth tokens, stop the event before Backbone sees it.
+  //
+  // (2) dataviz-auth-client.js URL cleanup: after a login callback the script
+  //     calls `history.replaceState({}, title, location.pathname)` to strip
+  //     auth params from the URL. This removes the hash entirely, which can
+  //     confuse interval-based routing or leave the address bar wrong.
+  //     Fix: wrap replaceState so that when the incoming URL has no hash but
+  //     the current location does, the existing hash is preserved.
+  const guardScript = `<script>
+(function () {
+  'use strict';
+
+  /* ── Guard 1: suppress hashchange caused by Supabase auth-token cleanup ── */
+  window.addEventListener('hashchange', function (e) {
+    var newHash = window.location.hash;
+    var oldUrl  = e.oldURL || '';
+    var hi      = oldUrl.indexOf('#');
+    var oldFrag = hi >= 0 ? oldUrl.slice(hi + 1) : '';
+    if ((!newHash || newHash === '#') && /access_token=/.test(oldFrag)) {
+      e.stopImmediatePropagation();
+    }
+  }, true /* capture – runs before Backbone's listener */);
+
+  /* ── Guard 2: keep hash intact when dataviz-auth-client strips the URL ── */
+  var _origReplaceState = history.replaceState.bind(history);
+  history.replaceState = function (state, title, url) {
+    if (typeof url === 'string' && url.indexOf('#') === -1 && window.location.hash) {
+      url = url + window.location.hash;
+    }
+    return _origReplaceState(state, title, url);
+  };
+}());
+</script>`;
+
   const injection =
     '  <style>body { padding-top: 48px !important; }</style>\n' +
     '  <script>window.DATAVIZ_HEADER_CONFIG = { mode: "public" };</script>\n' +
+    guardScript + "\n" +
     '  <script src="https://auth.dataviz.jp/lib/supabase.js"></script>\n' +
     '  <script src="https://auth.dataviz.jp/lib/dataviz-auth-client.js"></script>';
   if (html.includes("</head>")) {
