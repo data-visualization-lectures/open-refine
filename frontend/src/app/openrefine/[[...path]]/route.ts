@@ -215,6 +215,18 @@ function injectAuthScripts(html: string): string {
     '  <script>window.DATAVIZ_HEADER_CONFIG = { mode: "public" };</script>\n' +
     guardScript + "\n" +
     '  <script src="https://auth.dataviz.jp/lib/supabase.js"></script>\n' +
+    '  <script>(function(){\n' +
+    "    if (!window.supabase || window.__DATAVIZ_SUPABASE_PATCHED__) return;\n" +
+    "    var originalCreateClient = window.supabase.createClient && window.supabase.createClient.bind(window.supabase);\n" +
+    "    if (!originalCreateClient) return;\n" +
+    "    window.supabase.createClient = function(url, key, options) {\n" +
+    "      var next = options || {};\n" +
+    "      var auth = next.auth || {};\n" +
+    "      next = Object.assign({}, next, { auth: Object.assign({}, auth, { detectSessionInUrl: false }) });\n" +
+    "      return originalCreateClient(url, key, next);\n" +
+    "    };\n" +
+    "    window.__DATAVIZ_SUPABASE_PATCHED__ = true;\n" +
+    '  })();</script>\n' +
     '  <script src="https://auth.dataviz.jp/lib/dataviz-auth-client.js"></script>';
   if (html.includes("</head>")) {
     return html.replace("</head>", `${injection}\n</head>`);
