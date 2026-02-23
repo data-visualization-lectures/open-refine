@@ -1,11 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  skipTrailingSlashRedirect: true,
+  trailingSlash: true,
   async redirects() {
     return [
-      { source: "/", destination: "/openrefine", permanent: false },
-      { source: "/app/editor", destination: "/openrefine", permanent: false }
+      { source: "/", destination: "/openrefine/", permanent: false },
+      { source: "/app/editor", destination: "/openrefine/", permanent: false }
     ];
   }
 };

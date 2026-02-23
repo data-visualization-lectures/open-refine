@@ -134,7 +134,7 @@ function injectBaseHref(html: string): string {
 }
 
 function rewriteHomeButtonHref(html: string): string {
-  return html.replace(/(<a[^>]*id=["']app-home-button["'][^>]*href=["'])\.\/(["'][^>]*>)/i, "$1/openrefine$2");
+  return html.replace(/(<a[^>]*id=["']app-home-button["'][^>]*href=["'])\.\/(["'][^>]*>)/i, "$1/openrefine/$2");
 }
 
 function injectAuthScripts(html: string): string {
