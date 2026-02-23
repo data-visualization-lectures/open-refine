@@ -2,13 +2,11 @@
 const nextConfig = {
   reactStrictMode: true,
   skipTrailingSlashRedirect: true,
-  async rewrites() {
-    return {
-      beforeFiles: [
-        { source: "/", destination: "/openrefine" },
-        { source: "/app/editor", destination: "/openrefine" }
-      ]
-    };
+  async redirects() {
+    return [
+      { source: "/", destination: "/openrefine", permanent: false },
+      { source: "/app/editor", destination: "/openrefine", permanent: false }
+    ];
   }
 };
 
