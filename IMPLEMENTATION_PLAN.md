@@ -188,7 +188,7 @@ NGINX_PID=$!
 
 /opt/openrefine/refine \
   -i 127.0.0.1 -p 3333 \
-  -m "${REFINE_MEMORY:-1400M}" \
+  -m "${REFINE_MEMORY:-256M}" \
   -x refine.headless=true -d /data &
 REFINE_PID=$!
 
@@ -223,7 +223,7 @@ Railway は `backend/` ディレクトリの Dockerfile を自動検出。`railw
 | 変数 | 値 | 備考 |
 |---|---|---|
 | `PORT` | 自動注入 | 手動設定不要 |
-| `REFINE_MEMORY` | `1400M` | Railway プランに応じて調整 |
+| `REFINE_MEMORY` | `256M` | Railway プランに応じて調整 |
 | `OPENREFINE_SHARED_SECRET` | `openssl rand -hex 32` | Vercel プロキシからのアクセスのみ許可 |
 
 ---
@@ -374,7 +374,7 @@ OPENREFINE_DEFAULT_ACCEPT_LANGUAGE=ja-JP,ja;q=0.9,en;q=0.7
 1. GitHub リポジトリを Railway に接続
 2. サービスのルートディレクトリを `backend/` に指定
 3. Railway が Dockerfile を自動検出してビルド（初回 5〜10 分）
-4. 環境変数 `REFINE_MEMORY=1400M` と `OPENREFINE_SHARED_SECRET=<64文字ランダム文字列>` を設定
+4. 環境変数 `REFINE_MEMORY=256M` と `OPENREFINE_SHARED_SECRET=<64文字ランダム文字列>` を設定
 5. 生成された URL をメモ（例: `https://openrefine-xxx.up.railway.app`）
 
 ### Step 2: Vercel へフロントエンドをデプロイ

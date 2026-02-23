@@ -18,7 +18,7 @@ NGINX_PID=$!
 
 /opt/openrefine/refine \
   -i 127.0.0.1 -p 3333 \
-  -m "${REFINE_MEMORY:-1400M}" \
+  -m "${REFINE_MEMORY:-256M}" \
   -x refine.headless=true -d /data &
 REFINE_PID=$!
 
