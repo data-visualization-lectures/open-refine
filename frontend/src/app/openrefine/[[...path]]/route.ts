@@ -143,44 +143,69 @@ function injectAuthScripts(html: string): string {
   }
 
   // This guard script runs before supabase.js and dataviz-auth-client.js load.
-  // It prevents two known URL-manipulation patterns from disrupting OpenRefine's
-  // Backbone.js hash-based router:
+  // OpenRefine uses hash routing (e.g. "#open-project"), so removing the hash
+  // can trigger a visible re-route that looks like a reload.
   //
-  // (1) Supabase implicit grant cleanup: after extracting OAuth tokens from
-  //     "#access_token=…" in the URL, supabase-js calls
-  //     `window.location.hash = ""` which fires a `hashchange` event.
-  //     Backbone responds by re-routing, which appears as a page reload.
-  //     Fix: intercept hashchange in capture phase; if the new hash is empty
-  //     and the old hash held auth tokens, stop the event before Backbone sees it.
-  //
-  // (2) dataviz-auth-client.js URL cleanup: after a login callback the script
-  //     calls `history.replaceState({}, title, location.pathname)` to strip
-  //     auth params from the URL. This removes the hash entirely, which can
-  //     confuse interval-based routing or leave the address bar wrong.
-  //     Fix: wrap replaceState so that when the incoming URL has no hash but
-  //     the current location does, the existing hash is preserved.
+  // We guard against:
+  // (1) hash clears (window.location.hash = "") performed by auth cleanup.
+  // (2) history replace/push calls that drop the current hash fragment.
   const guardScript = `<script>
 (function () {
   'use strict';
+  var pageLoadedAt = Date.now();
 
-  /* ── Guard 1: suppress hashchange caused by Supabase auth-token cleanup ── */
+  /* ── Guard 1: suppress destructive hash-clearing events before Backbone sees them ── */
   window.addEventListener('hashchange', function (e) {
-    var newHash = window.location.hash;
+    var newHash = window.location.hash || '';
     var oldUrl  = e.oldURL || '';
-    var hi      = oldUrl.indexOf('#');
-    var oldFrag = hi >= 0 ? oldUrl.slice(hi + 1) : '';
-    if ((!newHash || newHash === '#') && /access_token=/.test(oldFrag)) {
+    var hi = oldUrl.indexOf('#');
+    var oldHash = hi >= 0 ? oldUrl.slice(hi) : '';
+    if (newHash && newHash !== '#') return;
+    if (!oldHash || oldHash === '#') return;
+
+    var ageMs = Date.now() - pageLoadedAt;
+    var looksLikeAuthHash = /(access_token=|refresh_token=|expires_in=|token_type=|error=|code=)/.test(oldHash);
+    if (looksLikeAuthHash || ageMs < 10000) {
       e.stopImmediatePropagation();
     }
   }, true /* capture – runs before Backbone's listener */);
 
-  /* ── Guard 2: keep hash intact when dataviz-auth-client strips the URL ── */
+  /* ── Guard 2: keep hash intact when external scripts rewrite history ── */
+  function withPreservedHash(urlArg) {
+    var currentHash = window.location.hash || '';
+    if (!currentHash || currentHash === '#') return urlArg;
+
+    if (urlArg == null) {
+      return window.location.pathname + window.location.search + currentHash;
+    }
+    if (typeof urlArg === 'string') {
+      if (urlArg.indexOf('#') !== -1) return urlArg;
+      return urlArg + currentHash;
+    }
+    if (typeof URL !== 'undefined' && urlArg instanceof URL) {
+      if (urlArg.hash) return urlArg;
+      var nextUrl = new URL(urlArg.toString(), window.location.href);
+      nextUrl.hash = currentHash.slice(1);
+      return nextUrl.toString();
+    }
+    try {
+      var parsed = new URL(String(urlArg), window.location.href);
+      if (parsed.hash) return urlArg;
+      parsed.hash = currentHash.slice(1);
+      return parsed.toString();
+    } catch (_err) {
+      return urlArg;
+    }
+  }
+
   var _origReplaceState = history.replaceState.bind(history);
   history.replaceState = function (state, title, url) {
-    if (typeof url === 'string' && url.indexOf('#') === -1 && window.location.hash) {
-      url = url + window.location.hash;
-    }
-    return _origReplaceState(state, title, url);
+    return _origReplaceState(state, title, withPreservedHash(url));
+  };
+
+  var _origPushState = history.pushState.bind(history);
+  history.pushState = function (state, title, url) {
+    return _origPushState(state, title, withPreservedHash(url));
   };
 }());
 </script>`;
