@@ -166,7 +166,13 @@ function injectBaseHref(html: string): string {
   // href attribute starts with "#" is always treated as a local (in-page) tab.
   const jqueryUiPatch = `<script>
 document.addEventListener('DOMContentLoaded', function () {
-  if (typeof jQuery !== 'undefined' && jQuery.ui && jQuery.ui.tabs) {
+  if (typeof jQuery === 'undefined') return;
+
+  /* Patch 1: jQuery UI Tabs _isLocal — prevent <base href="/openrefine/"> from
+     turning fragment-only hrefs (#refine-tabs-facets) into remote tab loads.
+     Without this, jQuery UI fetches the project page as a "remote" tab,
+     re-executing all scripts and causing "already declared" errors. */
+  if (jQuery.ui && jQuery.ui.tabs) {
     var orig = jQuery.ui.tabs.prototype._isLocal;
     jQuery.ui.tabs.prototype._isLocal = function (anchor) {
       var raw = anchor.getAttribute('href') || '';
@@ -174,6 +180,22 @@ document.addEventListener('DOMContentLoaded', function () {
       return orig.call(this, anchor);
     };
   }
+
+  /* Patch 2: Adjust jQuery outerHeight() for #header to include the fixed
+     auth-header height (48 px).  OpenRefine's resize() computes:
+       var top = $("#header").outerHeight();  // → 40 (CSS height only)
+       leftPanel.css("top", top + "px");      // → panels at 40px
+     But body{padding-top:48px} shifts #header to 48px from the viewport,
+     so panels must start at 48+40=88px.  Returning 88 here lets resize()
+     place panels below both headers and compute the correct panel height. */
+  var _origOuterHeight = jQuery.fn.outerHeight;
+  jQuery.fn.outerHeight = function (includeMargin) {
+    var result = _origOuterHeight.apply(this, arguments);
+    if (this.length === 1 && this[0] && this[0].id === 'header') {
+      return result + 48;
+    }
+    return result;
+  };
 });
 </script>`;
   return html.replace("<head>", `<head>\n  <base href="/openrefine/">\n${jqueryUiPatch}`);
