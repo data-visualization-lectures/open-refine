@@ -164,6 +164,15 @@ function injectAuthScripts(html: string): string {
     return html;
   }
 
+  // Only inject into full HTML documents, not HTML fragments loaded by OpenRefine
+  // via jQuery .load(). Fragments contain </body> but lack <html>/<doctype>, and
+  // injecting into them causes jQuery's domManip to re-execute the auth scripts,
+  // triggering "Identifier 'SUPABASE_URL' has already been declared" errors.
+  const lowerHtml = html.toLowerCase();
+  if (!lowerHtml.includes("<!doctype") && !lowerHtml.includes("<html")) {
+    return html;
+  }
+
   // This guard script runs before supabase.js and dataviz-auth-client.js load.
   // OpenRefine uses hash routing (e.g. "#open-project"), so removing the hash
   // can trigger a visible re-route that looks like a reload.
