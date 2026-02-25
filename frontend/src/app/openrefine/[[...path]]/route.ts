@@ -693,6 +693,27 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
 
     const upstreamBody = await upstream.arrayBuffer();
 
+    // Detect project creation via the importing-controller flow.
+    // The "Create Project" button calls importing-controller?subCommand=create-project
+    // which returns HTTP 200 (no redirect). The project ID then appears in the
+    // get-importing-job-status JSON body before the JS navigates to ?project=<id>.
+    // Register the project here so the subsequent ownership checks pass.
+    if (user && upstream.ok) {
+      const resolvedCmd = (params.path ?? []).filter(Boolean).at(-1) ?? "";
+      if (resolvedCmd === "get-importing-job-status") {
+        const bodyText = new TextDecoder().decode(upstreamBody);
+        const match = bodyText.match(/"project(?:ID|Id)"\s*:\s*(\d+)/);
+        if (match) {
+          const createdProjectId = match[1];
+          await registerProject(createdProjectId, user.id, createdProjectId, user.accessToken).catch(
+            (err: unknown) => {
+              console.error("[openrefine proxy] Failed to register project from job status", err);
+            }
+          );
+        }
+      }
+    }
+
     // Filter get-all-project-metadata to owned projects only
     if (user && method === "GET" && isGetAllProjectMetadataCommand(params.path) && upstream.ok) {
       const ownedIds = await listOwnedProjectIds(user.id, user.accessToken);
