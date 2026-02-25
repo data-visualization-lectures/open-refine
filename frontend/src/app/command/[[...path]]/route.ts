@@ -1,8 +1,15 @@
 import { ApiError } from "@/lib/api-error";
 import { type AuthenticatedUser, requireAuthenticatedUser } from "@/lib/auth";
 import { downloadOpenRefineArchive, listOpenRefineSavedProjects, type OpenRefineSavedProject } from "@/lib/openrefine-storage";
-import { registerProject } from "@/lib/project-registry";
-import { buildBackendHeaders, ensureCsrfHeader } from "@/lib/proxy";
+import { parseProjectIdFromBody, parseProjectIdFromLocation } from "@/lib/openrefine-project-id";
+import { registerProject, projectBelongsTo, touchProject, listOwnedProjectIds } from "@/lib/project-registry";
+import {
+  buildBackendHeaders,
+  ensureCsrfHeader,
+  filterProjectMetadata,
+  parseProjectId,
+  shouldEnforceProjectOwnership
+} from "@/lib/proxy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -141,62 +148,6 @@ function makeCloudSyncProjectName(saved: OpenRefineSavedProject): string {
   return `${head} [cloud:${shortId}]`;
 }
 
-function parseProjectId(raw: string | null): string | null {
-  if (!raw) {
-    return null;
-  }
-  const match = raw.match(/project=(\d+)/);
-  return match?.[1] ?? null;
-}
-
-function parseProjectIdFromBody(raw: string): string | null {
-  const fromQuery = parseProjectId(raw);
-  if (fromQuery) {
-    return fromQuery;
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const candidates = [parsed.project, parsed.projectID, parsed.projectId];
-    for (const candidate of candidates) {
-      if (typeof candidate === "number" && Number.isFinite(candidate)) {
-        return String(candidate);
-      }
-      if (typeof candidate === "string") {
-        if (/^\d+$/.test(candidate)) {
-          return candidate;
-        }
-        const nested = parseProjectId(candidate);
-        if (nested) {
-          return nested;
-        }
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  return raw.match(/\/project\?project=(\d+)/)?.[1] ?? null;
-}
-
-async function fetchAllProjectMetadata(request: Request): Promise<AllMetadataResponse> {
-  const backendBase = requireEnv("OPENREFINE_BACKEND_URL");
-  const url = new URL("/command/core/get-all-project-metadata", backendBase);
-  const headers = buildBackendHeaders(request);
-  headers.delete("content-type");
-
-  const response = await fetch(url, {
-    method: "GET",
-    headers,
-    cache: "no-store"
-  });
-  if (!response.ok) {
-    const reason = await response.text();
-    throw new ApiError(response.status, `Failed to fetch project metadata: ${reason}`);
-  }
-  return (await response.json()) as AllMetadataResponse;
-}
-
 async function importArchiveToOpenRefine(
   request: Request,
   archive: ArrayBuffer,
@@ -228,8 +179,8 @@ async function importArchiveToOpenRefine(
     throw new ApiError(response.status, `OpenRefine import-project failed: ${reason}`);
   }
 
-  const fromLocation = parseProjectId(response.headers.get("location"));
-  const fromUrl = parseProjectId(response.url);
+  const fromLocation = parseProjectIdFromLocation(response.headers.get("location"));
+  const fromUrl = parseProjectIdFromLocation(response.url);
   if (fromLocation || fromUrl) {
     return fromLocation ?? fromUrl;
   }
@@ -248,7 +199,18 @@ async function syncCloudProjectsToOpenRefineIfNeeded(request: Request, user: Aut
     return;
   }
 
-  const metadata = await fetchAllProjectMetadata(request);
+  const backendBase = requireEnv("OPENREFINE_BACKEND_URL");
+  const metaUrl = new URL("/command/core/get-all-project-metadata", backendBase);
+  const metaHeaders = buildBackendHeaders(request);
+  metaHeaders.delete("content-type");
+
+  const metaResponse = await fetch(metaUrl, {
+    method: "GET",
+    headers: metaHeaders,
+    cache: "no-store"
+  });
+  const metadata: AllMetadataResponse = metaResponse.ok ? ((await metaResponse.json()) as AllMetadataResponse) : {};
+
   const existingNames = new Set<string>();
   for (const project of Object.values(metadata.projects ?? {})) {
     const name = project?.name?.trim();
@@ -267,7 +229,7 @@ async function syncCloudProjectsToOpenRefineIfNeeded(request: Request, user: Aut
     const archive = await downloadOpenRefineArchive(user.accessToken, saved.archivePath);
     const importedProjectId = await importArchiveToOpenRefine(request, archive, syncName);
     if (importedProjectId) {
-      registerProject(importedProjectId, user.id, syncName);
+      await registerProject(importedProjectId, user.id, syncName, user.accessToken);
     }
     existingNames.add(syncName);
     imported += 1;
@@ -283,6 +245,18 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
     const targetUrl = buildTargetUrl(context.params.path, request.url);
     const method = request.method.toUpperCase();
     const command = context.params.path?.[context.params.path.length - 1] ?? "";
+
+    // Ownership enforcement for project-scoped commands
+    if (user && shouldEnforceProjectOwnership(command, request.url)) {
+      const projectId = parseProjectId(request.url);
+      if (!projectId) {
+        throw new ApiError(400, "project query parameter is required");
+      }
+      if (!(await projectBelongsTo(projectId, user.id, user.accessToken))) {
+        throw new ApiError(403, "Project does not belong to the authenticated user");
+      }
+      await touchProject(projectId, user.id, user.accessToken);
+    }
 
     if (user && method === "GET" && command === "get-all-project-metadata") {
       // Fire-and-forget: do not block the response waiting for cloud sync.
@@ -316,6 +290,18 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
     }
 
     const upstreamBody = await upstream.arrayBuffer();
+
+    // Filter get-all-project-metadata to owned projects only
+    if (user && method === "GET" && command === "get-all-project-metadata" && upstream.ok) {
+      const ownedIds = await listOwnedProjectIds(user.id, user.accessToken);
+      const filteredBody = filterProjectMetadata(upstreamBody, ownedIds);
+      return new Response(filteredBody, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: responseHeaders
+      });
+    }
+
     return new Response(upstreamBody, {
       status: upstream.status,
       statusText: upstream.statusText,

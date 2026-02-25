@@ -30,10 +30,10 @@ async function proxyRequest(request: Request, context: RouteContext): Promise<Re
       if (!projectId) {
         throw new ApiError(400, "project query parameter is required");
       }
-      if (!projectBelongsTo(projectId, user.id)) {
+      if (!(await projectBelongsTo(projectId, user.id, user.accessToken))) {
         throw new ApiError(403, "Project does not belong to the authenticated user");
       }
-      touchProject(projectId);
+      await touchProject(projectId, user.id, user.accessToken);
     }
 
     const backendUrl = buildBackendUrl(context.params.path, request.url);

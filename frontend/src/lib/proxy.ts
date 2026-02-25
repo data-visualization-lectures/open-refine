@@ -226,6 +226,49 @@ export function assertCronAuthorization(request: Request): void {
   }
 }
 
+/**
+ * Returns true when the given command+URL combination requires an ownership check.
+ * Exempts preview-only commands (get-models/get-rows/get-columns) that run with
+ * importingJobID instead of a project ID during the import flow.
+ */
+export function shouldEnforceProjectOwnership(command: string, requestUrl: string): boolean {
+  if (!requiresProjectOwnership(command)) return false;
+  const url = new URL(requestUrl);
+  const projectId = url.searchParams.get("project");
+  if (projectId) return true;
+  // During import preview, OpenRefine uses importingJobID instead of project.
+  const importingJobID = url.searchParams.get("importingJobID");
+  if (importingJobID && (command === "get-models" || command === "get-rows" || command === "get-columns")) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Filters a get-all-project-metadata JSON response body to only include
+ * projects owned by the authenticated user.
+ * Returns the filtered JSON string. Falls back to the original text on parse error.
+ */
+export function filterProjectMetadata(body: ArrayBuffer, ownedProjectIds: string[]): string {
+  const text = new TextDecoder().decode(body);
+  try {
+    const json = JSON.parse(text) as { projects?: Record<string, unknown> };
+    if (json.projects) {
+      const ownedSet = new Set(ownedProjectIds);
+      const filtered: Record<string, unknown> = {};
+      for (const [id, meta] of Object.entries(json.projects)) {
+        if (ownedSet.has(id)) {
+          filtered[id] = meta;
+        }
+      }
+      json.projects = filtered;
+    }
+    return JSON.stringify(json);
+  } catch {
+    return text;
+  }
+}
+
 export async function relayBackendResponse(response: Response): Promise<Response> {
   const headers = new Headers();
   for (const [key, value] of response.headers.entries()) {

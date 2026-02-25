@@ -71,6 +71,75 @@ begin
   end if;
 end$$;
 
+-- Runtime project ownership registry (Supabase-backed, replaces in-memory Map)
+create table if not exists public.openrefine_runtime_projects (
+  project_id text primary key,
+  owner_id uuid not null references auth.users(id) on delete cascade,
+  project_name text not null,
+  created_at timestamptz not null default now(),
+  last_access_at timestamptz not null default now()
+);
+
+create index if not exists openrefine_runtime_projects_owner_access_idx
+  on public.openrefine_runtime_projects (owner_id, last_access_at desc);
+
+create index if not exists openrefine_runtime_projects_last_access_idx
+  on public.openrefine_runtime_projects (last_access_at asc);
+
+alter table public.openrefine_runtime_projects enable row level security;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'openrefine_runtime_projects'
+      and policyname = 'openrefine_runtime_projects_select_own'
+  ) then
+    create policy openrefine_runtime_projects_select_own
+      on public.openrefine_runtime_projects
+      for select
+      using (auth.uid() = owner_id);
+  end if;
+
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'openrefine_runtime_projects'
+      and policyname = 'openrefine_runtime_projects_insert_own'
+  ) then
+    create policy openrefine_runtime_projects_insert_own
+      on public.openrefine_runtime_projects
+      for insert
+      with check (auth.uid() = owner_id);
+  end if;
+
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'openrefine_runtime_projects'
+      and policyname = 'openrefine_runtime_projects_update_own'
+  ) then
+    create policy openrefine_runtime_projects_update_own
+      on public.openrefine_runtime_projects
+      for update
+      using (auth.uid() = owner_id)
+      with check (auth.uid() = owner_id);
+  end if;
+
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'openrefine_runtime_projects'
+      and policyname = 'openrefine_runtime_projects_delete_own'
+  ) then
+    create policy openrefine_runtime_projects_delete_own
+      on public.openrefine_runtime_projects
+      for delete
+      using (auth.uid() = owner_id);
+  end if;
+end$$;
+
 -- Storage bucket (run once)
 insert into storage.buckets (id, name, public)
 values ('openrefine-projects', 'openrefine-projects', false)

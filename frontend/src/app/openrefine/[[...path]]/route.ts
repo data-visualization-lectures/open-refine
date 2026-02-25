@@ -8,8 +8,18 @@ import {
   type OpenRefineSavedProject,
   uploadOpenRefineArchive
 } from "@/lib/openrefine-storage";
-import { projectBelongsTo, registerProject } from "@/lib/project-registry";
-import { buildBackendHeaders, ensureCsrfHeader, parseMaxUploadSizeMb, sanitizeOpenRefineCookieHeader } from "@/lib/proxy";
+import { parseProjectIdFromBody, parseProjectIdFromLocation } from "@/lib/openrefine-project-id";
+import { projectBelongsTo, registerProject, touchProject, listOwnedProjectIds } from "@/lib/project-registry";
+import {
+  buildBackendHeaders,
+  ensureCsrfHeader,
+  filterProjectMetadata,
+  parseMaxUploadSizeMb,
+  parseProjectId,
+  resolveCommand,
+  sanitizeOpenRefineCookieHeader,
+  shouldEnforceProjectOwnership
+} from "@/lib/proxy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -295,10 +305,6 @@ function renderAlertRedirectPage(message: string, targetUrl: string, status = 20
   });
 }
 
-type ProjectMetadataResponse = {
-  name?: string;
-};
-
 type AllMetadataResponse = {
   projects?: Record<
     string,
@@ -316,43 +322,6 @@ function makeCloudSyncProjectName(saved: OpenRefineSavedProject): string {
   return `${head} [cloud:${shortId}]`;
 }
 
-function parseProjectId(raw: string | null): string | null {
-  if (!raw) {
-    return null;
-  }
-  const match = raw.match(/project=(\d+)/);
-  return match?.[1] ?? null;
-}
-
-function parseProjectIdFromBody(raw: string): string | null {
-  const fromQuery = parseProjectId(raw);
-  if (fromQuery) {
-    return fromQuery;
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const candidates = [parsed.project, parsed.projectID, parsed.projectId];
-    for (const candidate of candidates) {
-      if (typeof candidate === "number" && Number.isFinite(candidate)) {
-        return String(candidate);
-      }
-      if (typeof candidate === "string") {
-        if (/^\d+$/.test(candidate)) {
-          return candidate;
-        }
-        const nested = parseProjectId(candidate);
-        if (nested) {
-          return nested;
-        }
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  return raw.match(/\/project\?project=(\d+)/)?.[1] ?? null;
-}
 
 async function fetchAllProjectMetadata(request: Request): Promise<AllMetadataResponse> {
   const backendBase = requireEnv("OPENREFINE_BACKEND_URL");
@@ -403,8 +372,8 @@ async function importArchiveToOpenRefine(
     throw new ApiError(response.status, `OpenRefine import-project failed: ${reason}`);
   }
 
-  const fromLocation = parseProjectId(response.headers.get("location"));
-  const fromUrl = parseProjectId(response.url);
+  const fromLocation = parseProjectIdFromLocation(response.headers.get("location"));
+  const fromUrl = parseProjectIdFromLocation(response.url);
   if (fromLocation || fromUrl) {
     return fromLocation ?? fromUrl;
   }
@@ -442,7 +411,7 @@ async function syncCloudProjectsToOpenRefineIfNeeded(request: Request, user: Aut
     const archive = await downloadOpenRefineArchive(user.accessToken, saved.archivePath);
     const importedProjectId = await importArchiveToOpenRefine(request, archive, syncName);
     if (importedProjectId) {
-      registerProject(importedProjectId, user.id, syncName);
+      await registerProject(importedProjectId, user.id, syncName, user.accessToken);
     }
     existingNames.add(syncName);
     imported += 1;
@@ -452,27 +421,6 @@ async function syncCloudProjectsToOpenRefineIfNeeded(request: Request, user: Aut
   }
 }
 
-async function resolveOwnedProjectNameFromBackend(request: Request, projectId: string): Promise<string | null> {
-  const backendBase = requireEnv("OPENREFINE_BACKEND_URL");
-  const metadataUrl = new URL("/command/core/get-project-metadata", backendBase);
-  metadataUrl.searchParams.set("project", projectId);
-
-  const headers = buildProxyHeaders(request);
-  headers.delete("content-type");
-
-  const response = await fetch(metadataUrl, {
-    method: "GET",
-    headers,
-    cache: "no-store"
-  });
-  if (!response.ok) {
-    return null;
-  }
-
-  const metadata = (await response.json()) as ProjectMetadataResponse;
-  const name = metadata.name?.trim() ?? "";
-  return name || null;
-}
 
 async function exportArchiveFromOpenRefine(
   request: Request,
@@ -533,12 +481,8 @@ async function handleSupabaseProjectSaveFromExport(
     if (!openrefineProjectId || !/^\d+$/.test(openrefineProjectId)) {
       throw new ApiError(400, "プロジェクトIDの取得に失敗しました。");
     }
-    if (!projectBelongsTo(openrefineProjectId, user.id)) {
-      const resolvedName = await resolveOwnedProjectNameFromBackend(request, openrefineProjectId);
-      if (!resolvedName) {
-        throw new ApiError(403, "このプロジェクトを保存する権限がありません。");
-      }
-      registerProject(openrefineProjectId, user.id, resolvedName);
+    if (!(await projectBelongsTo(openrefineProjectId, user.id, user.accessToken))) {
+      throw new ApiError(403, "このプロジェクトを保存する権限がありません。");
     }
     if (!pathSegments || pathSegments.length < 4) {
       throw new ApiError(400, "export-project path is invalid");
@@ -639,6 +583,26 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
       return handleSupabaseProjectSaveFromExport(request, params.path);
     }
 
+    // Ownership enforcement for project-scoped commands
+    if (user && params.path && params.path.length > 0) {
+      let command: string;
+      try {
+        command = resolveCommand(params.path);
+      } catch {
+        command = "";
+      }
+      if (command && shouldEnforceProjectOwnership(command, request.url)) {
+        const projectId = parseProjectId(request.url);
+        if (!projectId) {
+          throw new ApiError(400, "project query parameter is required");
+        }
+        if (!(await projectBelongsTo(projectId, user.id, user.accessToken))) {
+          throw new ApiError(403, "Project does not belong to the authenticated user");
+        }
+        await touchProject(projectId, user.id, user.accessToken);
+      }
+    }
+
     if (user && method === "GET" && isGetAllProjectMetadataCommand(params.path)) {
       // Fire-and-forget: do not block the response waiting for cloud sync.
       // In Vercel's Node.js runtime the promise may be cut short when the
@@ -697,6 +661,18 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
     }
 
     const upstreamBody = await upstream.arrayBuffer();
+
+    // Filter get-all-project-metadata to owned projects only
+    if (user && method === "GET" && isGetAllProjectMetadataCommand(params.path) && upstream.ok) {
+      const ownedIds = await listOwnedProjectIds(user.id, user.accessToken);
+      const filteredBody = filterProjectMetadata(upstreamBody, ownedIds);
+      return new Response(filteredBody, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers
+      });
+    }
+
     return new Response(upstreamBody, {
       status: upstream.status,
       statusText: upstream.statusText,

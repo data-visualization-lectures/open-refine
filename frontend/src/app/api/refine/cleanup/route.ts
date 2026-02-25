@@ -39,7 +39,7 @@ export async function POST(request: Request): Promise<Response> {
     if (!projectId) {
       throw new ApiError(400, "projectId is required");
     }
-    if (!projectBelongsTo(projectId, user.id)) {
+    if (!(await projectBelongsTo(projectId, user.id, user.accessToken))) {
       throw new ApiError(403, "Project does not belong to the authenticated user");
     }
 
@@ -63,7 +63,7 @@ export async function POST(request: Request): Promise<Response> {
       throw new ApiError(backendResponse.status, `OpenRefine delete failed: ${text}`);
     }
 
-    removeProject(projectId);
+    await removeProject(projectId, user.id, user.accessToken);
     return Response.json({ deleted: true, projectId });
   } catch (error) {
     if (error instanceof ApiError) {

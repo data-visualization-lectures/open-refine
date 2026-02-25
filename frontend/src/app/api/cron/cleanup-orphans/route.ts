@@ -5,7 +5,7 @@ import {
   ensureCsrfHeader,
   parseMaxProjectAgeHours
 } from "@/lib/proxy";
-import { listStaleProjectIds, removeProject } from "@/lib/project-registry";
+import { listStaleProjectIds, removeProjectForCleanup } from "@/lib/project-registry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +15,8 @@ export async function GET(request: Request): Promise<Response> {
     assertCronAuthorization(request);
 
     const maxAgeHours = parseMaxProjectAgeHours();
-    const staleProjectIds = listStaleProjectIds(maxAgeHours);
+    // listStaleProjectIds uses the service role key to read across all users
+    const staleProjectIds = await listStaleProjectIds(maxAgeHours);
     const backendBase = process.env.OPENREFINE_BACKEND_URL;
     if (!backendBase) {
       throw new ApiError(500, "Missing environment variable: OPENREFINE_BACKEND_URL");
@@ -27,6 +28,8 @@ export async function GET(request: Request): Promise<Response> {
     for (const projectId of staleProjectIds) {
       const backendUrl = new URL("/command/core/delete-project", backendBase);
       backendUrl.searchParams.set("project", projectId);
+      // Backend auth relies solely on OPENREFINE_SHARED_SECRET (x-openrefine-proxy-secret).
+      // No user cookie is needed for the cron context.
       const headers = buildBackendHeaders(request);
       await ensureCsrfHeader(request, headers, "POST");
 
@@ -37,8 +40,13 @@ export async function GET(request: Request): Promise<Response> {
       });
 
       if (backendResponse.ok) {
-        removeProject(projectId);
-        deleted.push(projectId);
+        try {
+          await removeProjectForCleanup(projectId);
+          deleted.push(projectId);
+        } catch (removeError) {
+          const reason = removeError instanceof Error ? removeError.message : "registry removal failed";
+          failed.push({ projectId, reason });
+        }
       } else {
         failed.push({
           projectId,
