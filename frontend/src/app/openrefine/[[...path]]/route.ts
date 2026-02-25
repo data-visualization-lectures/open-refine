@@ -136,6 +136,18 @@ function rewriteLocationForProxy(location: string | null): string | null {
   }
 }
 
+const DATAVIZ_LOGIN_URL = "https://auth.dataviz.jp/auth/login";
+
+/**
+ * Returns true when the request looks like a browser page load (not an AJAX call).
+ * Used to redirect unauthenticated users to the login page rather than return JSON 401.
+ */
+function isHtmlBrowserRequest(request: Request): boolean {
+  if (request.method !== "GET") return false;
+  const accept = request.headers.get("accept") ?? "";
+  return accept.includes("text/html");
+}
+
 function injectBaseHref(html: string): string {
   if (html.includes("<base ")) {
     return html;
@@ -696,6 +708,11 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
     });
   } catch (error) {
     if (error instanceof ApiError) {
+      // Redirect unauthenticated browser page loads to the login page.
+      // AJAX calls (no text/html in Accept) still receive JSON 401.
+      if (error.status === 401 && isHtmlBrowserRequest(request)) {
+        return Response.redirect(DATAVIZ_LOGIN_URL, 302);
+      }
       return Response.json({ error: error.message }, { status: error.status });
     }
     const message = error instanceof Error ? error.message : "Unknown error";
