@@ -152,7 +152,31 @@ function injectBaseHref(html: string): string {
   if (html.includes("<base ")) {
     return html;
   }
-  return html.replace("<head>", '<head>\n  <base href="/openrefine/">');
+  // The <base href="/openrefine/"> tag makes OpenRefine's relative AJAX URLs
+  // (e.g. "command/core/...") resolve correctly to "/openrefine/command/core/...".
+  //
+  // Side-effect: fragment-only hrefs like <a href="#refine-tabs-facets"> resolve
+  // to "/openrefine/#refine-tabs-facets" instead of the current page URL.
+  // jQuery UI Tabs compares anchorUrl (without hash) with locationUrl (without hash)
+  // in _isLocal. They differ, so jQuery UI treats the tab as remote and fetches
+  // the project page via $.ajax({ url: "" }), which re-executes all page scripts
+  // and causes "Identifier X has already been declared" errors.
+  //
+  // The companion patch below overrides _isLocal so that any anchor whose raw
+  // href attribute starts with "#" is always treated as a local (in-page) tab.
+  const jqueryUiPatch = `<script>
+document.addEventListener('DOMContentLoaded', function () {
+  if (typeof jQuery !== 'undefined' && jQuery.ui && jQuery.ui.tabs) {
+    var orig = jQuery.ui.tabs.prototype._isLocal;
+    jQuery.ui.tabs.prototype._isLocal = function (anchor) {
+      var raw = anchor.getAttribute('href') || '';
+      if (raw.length > 1 && raw.charAt(0) === '#') return true;
+      return orig.call(this, anchor);
+    };
+  }
+});
+</script>`;
+  return html.replace("<head>", `<head>\n  <base href="/openrefine/">\n${jqueryUiPatch}`);
 }
 
 function rewriteHomeButtonHref(html: string): string {
@@ -698,6 +722,9 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
       // page, so re-injecting <script src="dataviz-auth-client.js"> causes jQuery's
       // domManip/_evalUrl to re-execute the script → "SUPABASE_URL already declared".
       const isXhr = request.headers.get("x-requested-with")?.toLowerCase() === "xmlhttprequest";
+      if (isXhr) {
+        console.log(`[openrefine proxy] XHR HTML response: ${request.method} ${request.url} status=${upstream.status}`);
+      }
       const rewrittenHtml = isXhr ? withHomeButton : injectAuthScripts(withHomeButton);
       return new Response(rewrittenHtml, {
         status: upstream.status,
