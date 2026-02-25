@@ -692,7 +692,13 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
       const html = await upstream.text();
       const withBase = injectBaseHref(html);
       const withHomeButton = rewriteHomeButtonHref(withBase);
-      const rewrittenHtml = injectAuthScripts(withHomeButton);
+      // Skip auth script injection for AJAX/XHR requests (e.g. jQuery .load(),
+      // DOM.loadHTML(), $.getJSON()). jQuery adds X-Requested-With: XMLHttpRequest
+      // to all AJAX calls. The loaded HTML gets inserted into an already-initialised
+      // page, so re-injecting <script src="dataviz-auth-client.js"> causes jQuery's
+      // domManip/_evalUrl to re-execute the script → "SUPABASE_URL already declared".
+      const isXhr = request.headers.get("x-requested-with")?.toLowerCase() === "xmlhttprequest";
+      const rewrittenHtml = isXhr ? withHomeButton : injectAuthScripts(withHomeButton);
       return new Response(rewrittenHtml, {
         status: upstream.status,
         statusText: upstream.statusText,
