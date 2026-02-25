@@ -176,7 +176,7 @@ export async function POST(request: Request): Promise<Response> {
     if (!projectId) {
       const fallbackFromMetadata = await findProjectIdByName(backendBase, headers, projectName);
       if (fallbackFromMetadata) {
-        registerProject(fallbackFromMetadata, user.id, projectName);
+        await registerProject(fallbackFromMetadata, user.id, projectName, user.accessToken);
 
         const responseHeaders = new Headers();
         const setCookie = backendResponse.headers.get("set-cookie");
@@ -196,7 +196,7 @@ export async function POST(request: Request): Promise<Response> {
       const fallbackBody = await backendResponse.text();
       const fallbackProjectId = parseProjectIdFromBody(fallbackBody);
       if (fallbackProjectId) {
-        registerProject(fallbackProjectId, user.id, projectName);
+        await registerProject(fallbackProjectId, user.id, projectName, user.accessToken);
 
         const responseHeaders = new Headers();
         const setCookie = backendResponse.headers.get("set-cookie");
@@ -218,7 +218,7 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    registerProject(projectId, user.id, projectName);
+    await registerProject(projectId, user.id, projectName, user.accessToken);
 
     const responseHeaders = new Headers();
     const setCookie = backendResponse.headers.get("set-cookie");

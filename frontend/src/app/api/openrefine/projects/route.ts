@@ -132,7 +132,7 @@ export async function POST(request: Request): Promise<Response> {
     const name = normalizeProjectName(body.name);
     const openrefineProjectId = normalizeOpenRefineProjectId(body.openrefineProjectId);
 
-    if (!projectBelongsTo(openrefineProjectId, user.id)) {
+    if (!(await projectBelongsTo(openrefineProjectId, user.id, user.accessToken))) {
       throw new ApiError(403, "OpenRefine project does not belong to the authenticated user");
     }
 

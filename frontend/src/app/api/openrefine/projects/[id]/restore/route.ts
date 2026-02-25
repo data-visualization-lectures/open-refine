@@ -209,7 +209,7 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
       );
     }
 
-    registerProject(projectId, user.id, restoreProjectName);
+    await registerProject(projectId, user.id, restoreProjectName, user.accessToken);
     return Response.json(
       {
         projectId,
