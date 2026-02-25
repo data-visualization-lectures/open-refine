@@ -244,9 +244,6 @@ function injectAuthScripts(html: string): string {
   return html.replace("</body>", `${injection}\n</body>`);
 }
 
-function isRootOpenRefinePath(pathSegments: string[] | undefined): boolean {
-  return !pathSegments || pathSegments.length === 0;
-}
 
 function isExportProjectCommand(pathSegments: string[] | undefined): boolean {
   if (!pathSegments || pathSegments.length < 4) {
@@ -623,6 +620,25 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
       cache: "no-store"
     });
 
+    // Detect project creation: OpenRefine responds with 302 + Location containing
+    // ?project=<new_id> when a project is successfully created via the web UI upload
+    // form. Register the project before forwarding the redirect so the browser's
+    // subsequent get-models / get-project-metadata requests pass the ownership check.
+    const rawLocation = upstream.headers.get("location");
+    if (user && rawLocation) {
+      const upstreamIsRedirect = upstream.status >= 300 && upstream.status < 400;
+      if (upstreamIsRedirect) {
+        const newProjectId = parseProjectIdFromLocation(rawLocation);
+        if (newProjectId) {
+          await registerProject(newProjectId, user.id, newProjectId, user.accessToken).catch(
+            (err: unknown) => {
+              console.error("Failed to register new project after creation", err);
+            }
+          );
+        }
+      }
+    }
+
     const headers = new Headers();
     for (const [key, value] of upstream.headers.entries()) {
       const lowered = key.toLowerCase();
@@ -650,7 +666,7 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
 
     if (isHtml) {
       const html = await upstream.text();
-      const withBase = isRootOpenRefinePath(params.path) ? injectBaseHref(html) : html;
+      const withBase = injectBaseHref(html);
       const withHomeButton = rewriteHomeButtonHref(withBase);
       const rewrittenHtml = injectAuthScripts(withHomeButton);
       return new Response(rewrittenHtml, {
