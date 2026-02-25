@@ -244,7 +244,7 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
     const user = await authorize(request);
     const targetUrl = buildTargetUrl(context.params.path, request.url);
     const method = request.method.toUpperCase();
-    const command = context.params.path?.[context.params.path.length - 1] ?? "";
+    const command = (context.params.path ?? []).filter(Boolean).at(-1) ?? "";
 
     // Ownership enforcement for project-scoped commands
     if (user && shouldEnforceProjectOwnership(command, request.url)) {
@@ -276,6 +276,20 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
       redirect: "manual",
       cache: "no-store"
     });
+
+    // Detect project creation: register the new project ID before forwarding
+    // so that subsequent get-project-metadata / get-models pass the ownership check.
+    const rawLocation = upstream.headers.get("location");
+    if (user && rawLocation && upstream.status >= 300 && upstream.status < 400) {
+      const newProjectId = parseProjectIdFromLocation(rawLocation);
+      if (newProjectId) {
+        await registerProject(newProjectId, user.id, newProjectId, user.accessToken).catch(
+          (err: unknown) => {
+            console.error("[command proxy] Failed to register new project after creation", err);
+          }
+        );
+      }
+    }
 
     const responseHeaders = new Headers();
     for (const [key, value] of upstream.headers.entries()) {

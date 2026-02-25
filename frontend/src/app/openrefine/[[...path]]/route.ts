@@ -605,7 +605,9 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
         if (!projectId) {
           throw new ApiError(400, "project query parameter is required");
         }
-        if (!(await projectBelongsTo(projectId, user.id, user.accessToken))) {
+        const belongs = await projectBelongsTo(projectId, user.id, user.accessToken);
+        if (!belongs) {
+          console.warn(`[openrefine proxy] 403: projectId=${projectId} userId=${user.id} command=${command}`);
           throw new ApiError(403, "Project does not belong to the authenticated user");
         }
         await touchProject(projectId, user.id, user.accessToken);
@@ -641,10 +643,11 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
       const upstreamIsRedirect = upstream.status >= 300 && upstream.status < 400;
       if (upstreamIsRedirect) {
         const newProjectId = parseProjectIdFromLocation(rawLocation);
+        console.log(`[openrefine proxy] 302 detected: status=${upstream.status} location=${rawLocation} newProjectId=${newProjectId ?? "null"} userId=${user.id}`);
         if (newProjectId) {
           await registerProject(newProjectId, user.id, newProjectId, user.accessToken).catch(
             (err: unknown) => {
-              console.error("Failed to register new project after creation", err);
+              console.error("[openrefine proxy] Failed to register new project after creation", err);
             }
           );
         }
