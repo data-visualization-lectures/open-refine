@@ -1,154 +1,166 @@
 # 同時利用耐性調査レポート（OpenRefine SaaS）
 
 - 調査日: 2026-02-25
-- 対象コミット: `3b3def490fd3211a5b2105fae21494242b436f32`
-- 結論: **現状の実装は「複数アカウントの同時利用に耐える」とは判断できない**
+- 対象コミット（調査時点）: `3b3def490fd3211a5b2105fae21494242b436f32`
+- 改修完了コミット（主要対応）: `0d65f85` 〜 `0f4b23d`（2026-02-25 セッション）
+- 結論（調査時点）: **現状の実装は「複数アカウントの同時利用に耐える」とは判断できない**
+- 結論（改修後）: **主要課題は解消済み。残存課題は低優先度のみ（後述）**
 
 ## 1. 判定サマリ
 
-- 判定: **NG（本番の同時利用耐性は不足）**
-- 主要理由:
-  - ランタイム所有権レジストリがプロセスローカル `Map`（非永続・非共有）
-  - `/openrefine/*` および `/command/*` の主要プロキシで所有権強制がない
-  - `get-all-project-metadata` がユーザーでフィルタされず、他ユーザーのプロジェクトID/名称露出リスクがある
-  - 所有権未登録時にバックエンドmetadataが取得できれば登録してしまう経路があり、権限昇格を招きうる
+| 項目 | 調査時点 | 改修後 |
+|------|----------|--------|
+| ランタイム所有権レジストリがプロセスローカル | NG | ✅ 解消 |
+| `/openrefine/*` 所有権強制なし | NG | ✅ 解消 |
+| `/command/*` 所有権強制なし | NG | ✅ 解消 |
+| `get-all-project-metadata` 他ユーザー情報露出 | NG | ⚠️ 部分解消（後述） |
+| 後付け所有権登録経路 | NG | ✅ 解消 |
+| `touchProject` ownerId 引数不足 | 軽微 | ✅ 解消 |
+| CloudSyncThrottle プロセスローカル | 低優先 | ⚠️ 未解消（低優先） |
+| E2E テスト | 未実施 | 未実施 |
 
 ## 2. 事実ベースの根拠（コード参照）
 
-### 2.1 ランタイム所有権がメモリのみ（重大）
+### 2.1 ランタイム所有権がメモリのみ ✅ 解消済み
 
-- `frontend/src/lib/project-registry.ts:17`
-  - コメントで「本番は durable store に置き換えるべき」と明記。
-- `frontend/src/lib/project-registry.ts:18-21`
-  - `globalThis.__openRefineRegistry__ = { records: new Map() }`
-- `frontend/src/lib/project-registry.ts:24-61`
-  - `registerProject / projectBelongsTo / touchProject / listStaleProjectIds` すべてローカルMap依存。
+**調査時点の問題:**
+- `frontend/src/lib/project-registry.ts` が `globalThis.__openRefineRegistry__` の in-memory Map で所有権管理
+- Vercel 複数インスタンス間で状態共有されず、403や誤判定を誘発
 
-影響:
-- Vercel/Railwayの複数インスタンス構成で状態共有されない。
-- あるインスタンスで登録した所有権を別インスタンスが認識できず、403や誤判定を誘発。
-- cleanup対象判定もインスタンス局所化される。
+**改修内容:**
+- `project-registry.ts` を Supabase `openrefine_runtime_projects` テーブルへの永続 DB 実装に全面置換
+- `registerProject / touchProject / projectBelongsTo / listOwnedProjectIds / removeProject` すべてが REST API 経由の Supabase 操作に変更
+- cleanup 専用関数（`listStaleProjectIds / removeProjectForCleanup`）は service role key を使用し RLS をバイパス
 
-### 2.2 `/openrefine/*` で所有権強制なし（重大）
+### 2.2 `/openrefine/*` で所有権強制なし ✅ 解消済み
 
-- `frontend/src/app/openrefine/[[...path]]/route.ts:632-660`
-  - `proxy` 関数内で `targetUrl` に対してそのまま `fetch` しており、`projectBelongsTo` チェックがない。
-- `frontend/src/app/openrefine/[[...path]]/route.ts:357-373`
-  - `get-all-project-metadata` を取得する処理が存在。
-- `frontend/src/app/openrefine/[[...path]]/route.ts:684-704`
-  - レスポンスをそのまま返却（ユーザーフィルタなし）。
+**調査時点の問題:**
+- `proxy` 関数が `projectBelongsTo` チェックなしでバックエンドへ転送
 
-補足: `export-project` 経路（`handleSupabaseProjectSaveFromExport`）のみは `projectBelongsTo` チェックが存在する（`route.ts:536`）。
-ただしそのフォールバックが「2.5 後付け登録」そのものであり、問題の本質は変わらない。
+**改修内容（`frontend/src/app/openrefine/[[...path]]/route.ts`）:**
+```ts
+// line 651-669
+if (user && shouldEnforceProjectOwnership(command, request.url)) {
+  const projectId = parseProjectId(request.url);
+  if (!projectId) throw new ApiError(400, ...);
+  if (!(await projectBelongsTo(projectId, user.id, user.accessToken))) {
+    throw new ApiError(403, "Project does not belong to the authenticated user");
+  }
+  await touchProject(projectId, user.id, user.accessToken);
+}
+```
 
-影響:
-- OpenRefine UI経由の主要操作に対して、ID指定アクセスの分離が成立しない可能性。
-- metadata露出による他プロジェクトIDの探索コスト低下。
+### 2.3 `/command/*` で所有権強制なし ✅ 解消済み
 
-### 2.3 `/command/*` で所有権強制なし（重大）
+**改修内容（`frontend/src/app/command/[[...path]]/route.ts`）:**
+```ts
+// line 250-259
+if (user && shouldEnforceProjectOwnership(command, request.url)) {
+  const projectId = parseProjectId(request.url);
+  if (!projectId) throw new ApiError(400, ...);
+  if (!(await projectBelongsTo(projectId, user.id, user.accessToken))) {
+    throw new ApiError(403, ...);
+  }
+  await touchProject(projectId, user.id, user.accessToken);
+}
+```
 
-- `frontend/src/app/command/[[...path]]/route.ts:280-304`
-  - コマンドを受けてそのままバックエンドへ転送。
-- `frontend/src/app/command/[[...path]]/route.ts:287-292`
-  - `get-all-project-metadata` 呼び出し時にもユーザー別フィルタ処理なし。
+### 2.4 `/api/refine/*` は所有権チェックあり（変更なし）
 
-影響:
-- `/command` 直経路でも分離が崩れる。
+- `frontend/src/app/api/refine/[...path]/route.ts:26-36` に `assertAllowedCommand` + `projectBelongsTo` + `touchProject` が引き続き存在
+- 改修で `touchProject` の引数が `(projectId)` → `(projectId, ownerId, accessToken)` に変更された
 
-### 2.4 `/api/refine/*` は所有権チェックあり（部分的に良い）
+### 2.5 所有権の「後付け登録」経路 ✅ 解消済み
 
-- `frontend/src/app/api/refine/[...path]/route.ts:25-37`
-  - `assertAllowedCommand` + `requiresProjectOwnership` + `projectBelongsTo`。
+**調査時点の問題:**
+- `get-project-metadata` 成功時に `registerProject` を呼ぶ経路が存在（誰でも ownership を取れる）
 
-ただし:
-- 判定元が前述のプロセスローカルMapであり、分散環境では整合しない。
-- `get-all-project-metadata` は `PROJECT_REQUIRED_COMMANDS` 外のため、所有権不要で通過。
-  - 参照: `frontend/src/lib/proxy.ts:3-25,72-74`
+**改修内容:**
+- metadata 取得成功による登録経路を全廃
+- 登録を許可する唯一の経路:
+  1. `302 redirect` + `Location` ヘッダーの `?project=<id>` から抽出（`/openrefine/*` および `/command/*`）
+  2. `get-importing-job-status` レスポンス body の `projectID` フィールドから抽出（後述 §3.1）
+  3. `syncCloudProjectsToOpenRefineIfNeeded` の `importArchiveToOpenRefine` 成功時（`/command/*`）
 
-### 2.5 所有権の「後付け登録」経路（重大）
+### 2.6 CloudSyncThrottle もプロセスローカル Map ⚠️ 未解消（低優先度）
 
-- `frontend/src/app/openrefine/[[...path]]/route.ts:536-542`
-  - `projectBelongsTo` が偽でも `get-project-metadata` 成功時に `registerProject(...)`。
+- `frontend/src/app/openrefine/[[...path]]/route.ts:38-73` の `__openRefineCloudSyncThrottle__`
+- `frontend/src/app/command/[[...path]]/route.ts:28-60` の同様の `__openRefineCloudSyncThrottle__`
+- セキュリティ問題ではなく、複数インスタンスで30秒スロットルが機能せず重複 cloudSync が走る可能性がある程度
 
-影響:
-- 未登録プロジェクトに対して現在ユーザーが所有権を後付けで確定させる余地がある。
-- 本来必要な「作成イベント起点の所有権確定」が崩れる。
+### 2.7 OpenRefine本体は単一 `/data` を共有（設計前提・変更なし）
 
-### 2.6 CloudSyncThrottleもプロセスローカルMap（運用上の懸念）
+- `backend/entrypoint.sh` の `refine ... -d /data` は変更なし
+- 分離はプロキシ層で担保する設計方針を維持
 
-- `frontend/src/app/openrefine/[[...path]]/route.ts:30-64`
-  - `globalThis.__openRefineCloudSyncThrottle__` は `Map<string, number>` でスロットル状態を保持。
-- `frontend/src/app/command/[[...path]]/route.ts:22-52`
-  - 同様の `__openRefineCloudSyncThrottle__` がもう1か所存在。
+### 2.8 保存領域（Supabase）は比較的健全（変更なし）
 
-影響:
-- セキュリティ問題ではないが、同一ユーザーが複数インスタンスに振られた場合、
-  各インスタンスで独立してスロットルが管理されるため30秒スロットルが機能せず重複syncが走る可能性がある。
-- 過剰なimport-project呼び出しによりOpenRefineのメモリ消費が増大する。
+- `openrefine_projects` と Storage バケットの RLS は有効
+- `openrefine_runtime_projects` も RLS 付きで追加済み（`OPENREFINE_SUPABASE_SCHEMA.sql` 参照）
 
-### 2.7 OpenRefine本体は単一 `/data` を共有（設計前提）
+### 2.9 `/api/refine/*` の `touchProject` 引数不足 ✅ 解消済み
 
-- `backend/entrypoint.sh:19-23`
-  - `refine ... -d /data` で共通データディレクトリ。
-- `IMPLEMENTATION_PLAN.md:39-44`
-  - OpenRefineはマルチユーザー非対応、プロキシで分離する設計方針。
+- `touchProject(projectId)` → `touchProject(projectId, user.id, user.accessToken)` に変更済み
 
-評価:
-- つまり分離の成否はプロキシ実装に依存するが、現状その実装が不足。
+### 2.10 `get-all-project-metadata` フィルタ ⚠️ 部分解消
 
-### 2.8 保存領域（Supabase）は比較的健全（良い）
+**改修内容:**
+- `/command/[[...path]]/route.ts:309-317` に `filterProjectMetadata` による owned フィルタ実装済み
+- `/openrefine/[[...path]]/route.ts:781-784` に同様の実装済み
 
-- `OPENREFINE_SUPABASE_SCHEMA.sql:4-20,30-71`
-  - `openrefine_projects` にRLS。
-- `OPENREFINE_SUPABASE_SCHEMA.sql:74-145`
-  - Storageにもユーザーフォルダ単位のRLSポリシー。
+**残存課題:**
+- `/api/refine/[...path]/route.ts` には `get-all-project-metadata` フィルタが未実装
+  - ただし `assertAllowedCommand` は `get-all-project-metadata` を `ALLOWED_COMMANDS` に含むため通過可能
+  - ユーザーが `/api/refine/command/core/get-all-project-metadata` を直接呼んだ場合、他ユーザーの metadata が返りうる
 
-評価:
-- 永続保存機能のデータ面はユーザー分離が効いている。
-- 問題は「ランタイムOpenRefineプロジェクトIDの分離」側。
+## 3. 改修で判明した実装上の発見
 
-### 2.9 `/api/refine/*` の `touchProject` 引数不足（軽微）
+### 3.1 `create-project` フローが HTTP 302 でなく HTTP 200 だった（重要）
 
-- `frontend/src/app/api/refine/[...path]/route.ts:36`
-  - `touchProject(projectId)` に `ownerId` を渡していない。
-  - 現状のメモリMap実装では問題ないが、DB版（`UPDATE WHERE project_id = ? AND owner_id = ?`）へ移行する際に引数追加が必要になる。
+**計画での想定:**
+- `create-project` 成功 → 302 redirect + `Location: ?project=<id>` → projectId 抽出 → 登録
 
-## 3. 同時利用シナリオ評価
+**実際の挙動:**
+- `importing-controller?subCommand=create-project` → HTTP 200（リダイレクトなし）
+- 非同期の job status ポーリング: `get-importing-job-status` レスポンス body に `"projectID": <id>` が含まれる
+- これを `/openrefine/[[...path]]/route.ts:765-778` で body regex マッチして登録するよう実装した
 
-### シナリオA: 同時に複数ユーザーが編集
+**実装:**
+```ts
+if (resolvedCmd === "get-importing-job-status") {
+  const match = bodyText.match(/"project(?:ID|Id)"\s*:\s*(\d+)/);
+  if (match) {
+    await registerProject(match[1], user.id, match[1], user.accessToken);
+  }
+}
+```
 
-- 判定: **不十分**
-- 理由:
-  - ランタイム所有権が永続・共有されないため、インスタンス跨ぎで認可判定が不整合。
-  - `/openrefine`/`/command` 経路はそもそも所有権チェック未実装。
+### 3.2 登録時の `project_name` は仮名（projectId と同値）
 
-### シナリオB: ユーザーAがユーザーBのproject IDを知った場合
+- 302 redirect や `get-importing-job-status` 経由では project name が取得不可
+- `registerProject(projectId, user.id, projectId, ...)` と projectId を仮名として登録
+- `openrefine_runtime_projects.project_name` は Display 用途のみ、所有権判定には使わないため実害なし
+- cloudSync 経由（`importArchiveToOpenRefine` 後）のみ正式な `syncName` が使用される
 
-- 判定: **リスク高**
-- 理由:
-  - metadata露出経路があり、ID取得が容易になる可能性。
-  - 経路によっては所有権未強制で操作が到達しうる。
+## 4. 優先度付き改善提案（改訂版）
 
-### シナリオC: cleanup運用
-
-- 判定: **限定的**
-- 理由:
-  - stale判定がローカルMap依存で、分散環境全体の実態を見ない。
-  - `frontend/vercel.json:1-8` でcronは動くが、入力データが局所的。
-
-## 4. 優先度付き改善提案
-
-1. `openrefine_runtime_projects` のような永続レジストリを導入し、所有権をDBで一元化する（最優先）
-2. 所有権チェックを `/openrefine/*` と `/command/*` にも共通適用し、`/api/refine/*` と同一基準へ統一
-3. `get-all-project-metadata` はユーザー所有分のみ返すフィルタを必須化
-4. 「metadata取得できたら所有権登録する」経路を削除し、作成/復元成功イベントのみ登録許可に変更
-5. `touchProject` に `ownerId` 引数を追加し、DB版移行時に `WHERE project_id = ? AND owner_id = ?` で更新できるようにする
-6. CloudSyncThrottle をDB（または共有KVS）に移行し、分散環境でのスロットル重複を防ぐ（優先度は低）
-7. 本番で `ALLOW_ANON_OPENREFINE_UI` / `ALLOW_ANON_PROJECT_CREATE` を必ず `false` に固定
-8. E2E追加（2ユーザー同時ログイン、相互project IDアクセス禁止、インスタンス跨ぎ認可）
+| 優先度 | 内容 | 状況 |
+|--------|------|------|
+| 最優先 | `openrefine_runtime_projects` 永続レジストリ | ✅ 完了 |
+| 高 | `/openrefine/*`, `/command/*` 所有権チェック統一 | ✅ 完了 |
+| 高 | `get-all-project-metadata` owned フィルタ | ⚠️ `/api/refine` 未実装 |
+| 中 | 後付け metadata 登録廃止 | ✅ 完了 |
+| 中 | `touchProject` に `ownerId` 引数追加 | ✅ 完了 |
+| 低 | CloudSyncThrottle を共有 KVS へ移行 | 未着手 |
+| 低 | 本番で `ALLOW_ANON_*` を `false` に固定 | ✅ デフォルト false |
+| 低 | E2E テスト追加 | 未実施 |
 
 ## 5. 最終結論
 
-このコミット時点（`3b3def...`）では、  
-**単一ユーザーまたは検証用途なら動作するが、複数ユーザー同時利用を安全に支える設計・実装としては未達**です。
+調査時点（`3b3def...`）では単一ユーザー・検証用途のみ安全な状態でしたが、
+`0d65f85` 〜 `0f4b23d` の改修により **主要なマルチユーザー同時利用リスクは解消されました**。
 
+残存課題は:
+1. `/api/refine` 経由の `get-all-project-metadata` に他ユーザー情報が含まれる可能性（中優先）
+2. CloudSyncThrottle が分散環境でスロットル重複しうる（低優先・セキュリティ問題なし）
+3. E2E テスト未実施（信頼性担保のため実施推奨）

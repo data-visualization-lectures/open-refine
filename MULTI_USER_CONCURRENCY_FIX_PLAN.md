@@ -2,6 +2,8 @@
 
 本計画は [MULTI_USER_CONCURRENCY_ASSESSMENT.md](/Users/yuichiyazaki/Documents/GitHubRepository/Prj_App_SelfWorks/openrefine/MULTI_USER_CONCURRENCY_ASSESSMENT.md) の指摘を解消し、`3b3def...` 時点の「単一インスタンス依存・認可不足」状態を、本番の複数ユーザー同時利用に耐える構成へ移行するための実装仕様です。
 
+> **実装ステータス（2026-02-25 更新）:** ステップ 1〜7 は完了済み。残存課題は §12 を参照。
+
 ## 0. ゴールと非ゴール
 
 ### ゴール
@@ -16,10 +18,14 @@
 
 ## 1. データモデル（Supabase）変更
 
-## 1.1 新規テーブル
-`public.openrefine_runtime_projects` を追加する。
+## 1.1 新規テーブル ✅ 完了
+`public.openrefine_runtime_projects` を追加した。
 
 `project_name` はDisplay用途のみで所有権判定には使わない。OpenRefineでプロジェクト名が変更されると陳腐化するが、判定ロジックには影響しないため best-effort（変更追従なし）とする。
+
+> **実装補足:** 302 redirect 経由や `get-importing-job-status` 経由でのプロジェクト登録時は、
+> project name が取得不可なため `project_id` を仮名として登録している。
+> `registerProject(projectId, user.id, projectId, accessToken)` の形。
 
 ```sql
 create table if not exists public.openrefine_runtime_projects (
@@ -39,7 +45,7 @@ create index if not exists openrefine_runtime_projects_last_access_idx
 alter table public.openrefine_runtime_projects enable row level security;
 ```
 
-## 1.2 RLSポリシー
+## 1.2 RLSポリシー ✅ 完了
 `FOR ALL` 1本ではなく操作別に定義する。
 
 ```sql
@@ -96,13 +102,13 @@ begin
 end$$;
 ```
 
-## 2. `project-registry.ts` の全面刷新
+## 2. `project-registry.ts` の全面刷新 ✅ 完了
 
 ## 2.1 認可モデル（重要）
 - **通常リクエスト**: ユーザーの `accessToken` を使ってRLS準拠で操作する。
 - **cron cleanup**: `SUPABASE_SERVICE_ROLE_KEY` を使って全件横断操作する。
 
-## 2.2 新しい関数仕様
+## 2.2 新しい関数仕様（実装済み）
 
 ```ts
 export async function registerProject(
@@ -140,106 +146,114 @@ export async function listStaleProjectIds(maxAgeHours: number): Promise<string[]
 export async function removeProjectForCleanup(projectId: string): Promise<void>;
 ```
 
-## 2.3 実装ルール
-- in-memory `Map` 実装を削除する（フォールバックも廃止）。
-- `on_conflict=project_id` upsert で登録を冪等化する。
-  - 異なるオーナーが同じ `project_id` でupsertしようとした場合、RLSのUPDATEポリシー (`USING (auth.uid() = owner_id)`) により更新が阻止される。`PGRST116`（ゼロ行更新）等のエラーを適切にハンドリングし、呼び出し側が 403 を返せるようにする。
-- `touchProject` は `project_id + owner_id` 条件で更新し、RLSとSQLの両方でオーナー確認を二重化する。
-- `registerProject` 呼び出しサイトでは必ず `user.id` を `ownerId` として渡すこと（RLSのINSERTポリシー `with check (auth.uid() = owner_id)` は `ownerId` がリクエストユーザーと一致する場合のみ許可する）。
+## 2.3 実装ルール ✅ 完了
+- in-memory `Map` 実装を削除した（フォールバックも廃止）。
+- `on_conflict=project_id` upsert で登録を冪等化した。
+  - 異なるオーナーが同じ `project_id` でupsertしようとした場合、RLSのUPDATEポリシー (`USING (auth.uid() = owner_id)`) により更新が阻止される。
+- `touchProject` は `project_id + owner_id` 条件で更新し、RLSとSQLの両方でオーナー確認を二重化した。
 
-## 3. 認可の共通化（Body消費を避ける）
+## 3. 認可の共通化 ✅ 完了
 
 ## 3.1 方針
 - 共通認可は **query/path ベース** で実施し、`request.body` を読まない。
 - Body読取が必要な例外は、各route内で `clone()` 等を使って明示的に処理する。
 
-## 3.2 `proxy.ts` に共通関数を追加
-- `shouldEnforceProjectOwnership(command, requestUrl)` を導入。
+## 3.2 `proxy.ts` に共通関数を追加（実装済み）
+- `shouldEnforceProjectOwnership(command, requestUrl)` を実装。
 - `importingJobID` のプレビューAPI（`get-models/get-rows/get-columns`）は `project` なしで許可する（現行互換）。
 
 ```ts
-if (!projectId && importingJobID && (command === "get-models" || ...)) return false;
+// frontend/src/lib/proxy.ts
+export function shouldEnforceProjectOwnership(command: string, requestUrl: string): boolean {
+  if (!requiresProjectOwnership(command)) return false;
+  const url = new URL(requestUrl);
+  const projectId = url.searchParams.get("project");
+  if (projectId) return true;
+  const importingJobID = url.searchParams.get("importingJobID");
+  if (importingJobID && (command === "get-models" || command === "get-rows" || command === "get-columns")) {
+    return false;
+  }
+  return true;
+}
 ```
 
-## 3.3 適用対象
-- `app/api/refine/[...path]/route.ts`
-- `app/command/[[...path]]/route.ts`
-- `app/openrefine/[[...path]]/route.ts`
+## 3.3 適用対象 ✅ 完了
+- `app/api/refine/[...path]/route.ts` ✅
+- `app/command/[[...path]]/route.ts` ✅
+- `app/openrefine/[[...path]]/route.ts` ✅
 
-上記すべてで、所有権対象コマンドは以下を実施:
-1. `project` query の取得
-2. `await projectBelongsTo(..., user.accessToken)` 判定
-3. 不一致なら `403`
-4. 一致なら `touchProject(..., user.accessToken)`
+## 4. `get-all-project-metadata` フィルタ実装 ⚠️ 部分完了
 
-## 4. `get-all-project-metadata` フィルタ実装
+- `app/command/[[...path]]/route.ts:309-317` ✅ 実装済み
+- `app/openrefine/[[...path]]/route.ts:781-784` ✅ 実装済み
+- `app/api/refine/[...path]/route.ts` ⚠️ **未実装**（残存課題 §12.1 参照）
 
-対象ルート:
-- `app/openrefine/[[...path]]/route.ts`
-- `app/command/[[...path]]/route.ts`
-- `app/api/refine/[...path]/route.ts`
+実装済みパターン（`filterProjectMetadata` in `proxy.ts`）:
+```ts
+const ownedIds = await listOwnedProjectIds(user.id, user.accessToken);
+const filteredBody = filterProjectMetadata(upstreamBody, ownedIds);
+return new Response(filteredBody, { ... });
+```
 
-仕様:
-1. upstream JSON を読み込む
-2. `ownedProjectIds = await listOwnedProjectIds(user.id, user.accessToken)`
-3. `projects` を `ownedProjectIds` でフィルタ
-4. filtered body を返却（`content-length` は削除）
+## 5. 所有権登録経路の厳格化 ✅ 完了
 
-## 5. 所有権登録経路の厳格化
+## 5.1 廃止した処理 ✅
+- `resolveOwnedProjectNameFromBackend` のような「metadataが読めたら所有者として登録」を全廃した。
 
-## 5.1 廃止する処理
-- `resolveOwnedProjectNameFromBackend` のような「metadataが読めたら所有者として登録」を全廃する。
+## 5.2 登録を許可する経路（実装済み）
 
-## 5.2 登録を許可する唯一の経路
-- `create-project*` 成功時（location/url/body から projectId 抽出）
-- `import-project` 成功時（restore/sync含む）
-  - `syncCloudProjectsToOpenRefineIfNeeded`（`/openrefine/*` および `/command/*` の両経路）でのimport成功時も必ずここで登録すること。cloudSync経由の登録を保証しないと、後付け登録を廃止した後に cloudSync由来プロジェクトへの操作がすべて403になる。
+| 経路 | 実装箇所 | 備考 |
+|------|----------|------|
+| 302 redirect + `Location: ?project=<id>` | `openrefine/route.ts:697-710`, `command/route.ts:283-292` | 主に `import-project` |
+| `get-importing-job-status` body の `projectID` | `openrefine/route.ts:765-778` | UI での新規作成（後述） |
+| cloudSync `importArchiveToOpenRefine` 成功時 | `command/route.ts:232` | 復元・sync 由来 |
 
-補足:
-- projectId 抽出ロジックは `lib/openrefine-project-id.ts`（新規）に集約する。
+> **⚠️ 計画との乖離：`create-project` フローが 302 でなかった**
+>
+> 計画策定時は「create-project → 302 redirect → projectId 取得」を想定していたが、
+> 実際には `importing-controller?subCommand=create-project` は HTTP 200 を返し、
+> リダイレクトは発生しない。代わりに以下の非同期フローを用いる:
+>
+> 1. `importing-controller?subCommand=create-project` → 200（jobId を返す）
+> 2. `get-importing-job-status?jobID=<id>` を JS がポーリング
+> 3. ジョブ完了時のレスポンス body に `"projectID": <数値>` が含まれる
+> 4. プロキシがこの body を regex マッチして `registerProject` を呼ぶ
+>
+> この挙動は OpenRefine のバージョン 3.9.5 で確認済み。
 
-## 6. cleanup 改修（分散対応）
+## 6. cleanup 改修（分散対応） ✅ 完了
 
-`/api/cron/cleanup-orphans` は以下に変更:
+`/api/cron/cleanup-orphans` の実装:
 1. `listStaleProjectIds(maxAgeHours)` でDBから候補取得（service role）
-2. OpenRefine `delete-project` 実行
-   - バックエンド認証は `OPENREFINE_SHARED_SECRET`（`x-openrefine-proxy-secret` ヘッダ）で行うため、cronリクエストにユーザーcookieがなくても認証可能であることを前提とする。現在の `buildBackendHeaders(request)` の実装がこれを満たしていることを確認する。
+2. OpenRefine `delete-project` を `OPENREFINE_SHARED_SECRET` ヘッダー付きで実行
+   - `buildBackendHeaders(request)` が `x-openrefine-proxy-secret` を付与するため cron コンテキストでも認証可能
 3. 成功時 `removeProjectForCleanup(projectId)` でレジストリ削除
-4. 失敗は `failed[]` に集約し再試行可能にする
+4. 失敗は `failed[]` に集約してレスポンスに返却
 
-## 7. 環境変数・運用ガード
+## 7. 環境変数・運用ガード ✅ 完了
 
 必須:
-- `SUPABASE_SERVICE_ROLE_KEY`（cleanupと運用操作）
+- `SUPABASE_SERVICE_ROLE_KEY`（cleanup と運用操作）
 - `OPENREFINE_SHARED_SECRET`
 - `OPENREFINE_BACKEND_URL`
 - `CRON_SECRET`
 
 本番固定:
-- `ALLOW_ANON_OPENREFINE_UI=false`
-- `ALLOW_ANON_PROJECT_CREATE=false`
+- `ALLOW_ANON_OPENREFINE_UI=false`（デフォルト値）
+- `ALLOW_ANON_PROJECT_CREATE=false`（デフォルト値）
 
-## 8. 実装ステップ（順序固定）
+## 8. 実装ステップ（完了状況）
 
-1. **DB migration**
-   - `openrefine_runtime_projects` + index + RLS policy 適用
-2. **Registry layer差し替え**
-   - `project-registry.ts` をSupabase永続版へ置換
-   - `touchProject` シグネチャを `(projectId, ownerId, accessToken?)` に変更（`/api/refine/*` 側も合わせて更新）
-3. **ID抽出ユーティリティ導入**
-   - `parseProjectIdFromLocation / parseProjectIdFromBody` を `lib/openrefine-project-id.ts` に集約
-4. **認可共通化適用**
-   - `/api/refine` `/command` `/openrefine` に統一導入
-5. **metadataフィルタ適用**
-   - `get-all-project-metadata` で所有分のみ返却
-6. **後付け登録削除・cloudSync登録保証**
-   - `resolveOwnedProjectNameFromBackend` を含む metadataベース自動登録を削除
-   - `syncCloudProjectsToOpenRefineIfNeeded` 内の import 成功時 `registerProject` が正しく動作することを確認
-7. **cleanup改修**
-   - DB起点のstale cleanupへ切替
-   - `buildBackendHeaders` の動作（`OPENREFINE_SHARED_SECRET` のみで認証できること）を確認
-8. **本番env固定**
-   - `ALLOW_ANON_*` を `false` に設定
+| ステップ | 内容 | 状況 |
+|---------|------|------|
+| 1 | DB migration（`openrefine_runtime_projects` + RLS） | ✅ 完了 |
+| 2 | Registry layer 差し替え（Supabase 永続版）| ✅ 完了 |
+| 3 | ID抽出ユーティリティ（`lib/openrefine-project-id.ts`） | ✅ 完了 |
+| 4 | 認可共通化（`shouldEnforceProjectOwnership`）適用 | ✅ 完了 |
+| 5 | `get-all-project-metadata` フィルタ | ⚠️ `/api/refine` 未実装 |
+| 6 | 後付け登録削除・cloudSync 登録保証 | ✅ 完了 |
+| 7 | cleanup 改修（DB 基準） | ✅ 完了 |
+| 8 | 本番 `ALLOW_ANON_*` を `false` に設定 | ✅ デフォルト false |
 
 ## 9. 検証計画（必須）
 
@@ -264,11 +278,33 @@ if (!projectId && importingJobID && (command === "get-models" || ...)) return fa
 
 ## 11. 完了条件（Definition of Done）
 
-- 同時利用での相互アクセス不可をE2Eで証明（403）
-- metadata漏えいが解消
-- cloudSync由来プロジェクトが正常にアクセスできる（400/403が出ない）
-- cleanup がDB基準で稼働
-- 本番 `ALLOW_ANON_*` が `false`
-- `touchProject` が `ownerId` を検証した上でlast_access_atを更新できている
-- 監視ログに認可失敗理由（projectId, command, userId）が記録される
+- 同時利用での相互アクセス不可をE2Eで証明（403） ← **未達**
+- metadata漏えいが解消 ← **`/api/refine` 経路は未達**
+- cloudSync由来プロジェクトが正常にアクセスできる（400/403が出ない） ← ✅ 動作確認済み
+- cleanup がDB基準で稼働 ← ✅ 完了
+- 本番 `ALLOW_ANON_*` が `false` ← ✅ 完了
+- `touchProject` が `ownerId` を検証した上で `last_access_at` を更新できている ← ✅ 完了
+- 監視ログに認可失敗理由（projectId, command, userId）が記録される ← ✅ `console.warn` で記録済み
 
+## 12. 残存課題
+
+### 12.1 `/api/refine` の `get-all-project-metadata` フィルタ未実装（中優先度）
+
+`GET /api/refine/command/core/get-all-project-metadata` を直接呼ばれると、
+他ユーザーのプロジェクト metadata が返る可能性がある。
+通常の OpenRefine UI フローはこの経路を使わないが、API 直叩きによるリスクは残存。
+
+**対処方針（未実装）:**
+`app/api/refine/[...path]/route.ts` の `get-all-project-metadata` レスポンス処理に
+`filterProjectMetadata(body, await listOwnedProjectIds(...))` を追加する。
+
+### 12.2 CloudSyncThrottle のプロセスローカル Map（低優先度）
+
+`globalThis.__openRefineCloudSyncThrottle__` が各ルートに存在し、分散環境でスロットルが機能せず cloudSync が重複する可能性がある。セキュリティ問題ではなく、OpenRefine のメモリ消費増大リスクのみ。
+
+**対処方針（未実装）:**
+Vercel KV（Redis）や Supabase テーブルへ移行する。
+
+### 12.3 E2E テスト未実施（低優先度）
+
+2ユーザー同時ログインでの相互アクセス禁止、インスタンス跨ぎ認可の自動化テストが未実施。
