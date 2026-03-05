@@ -7,6 +7,7 @@ import {
   buildBackendHeaders,
   ensureCsrfHeader,
   filterProjectMetadata,
+  patchLoadLanguageResponse,
   parseProjectId,
   shouldEnforceProjectOwnership
 } from "@/lib/proxy";
@@ -304,6 +305,16 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
     }
 
     const upstreamBody = await upstream.arrayBuffer();
+
+    // Patch load-language response to override UI strings
+    if (method === "POST" && command === "load-language" && upstream.ok) {
+      const patched = patchLoadLanguageResponse(upstreamBody);
+      return new Response(patched, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: responseHeaders
+      });
+    }
 
     // Filter get-all-project-metadata to owned projects only
     if (user && method === "GET" && command === "get-all-project-metadata" && upstream.ok) {

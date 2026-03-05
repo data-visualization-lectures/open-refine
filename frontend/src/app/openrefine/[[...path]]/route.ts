@@ -14,6 +14,7 @@ import {
   buildBackendHeaders,
   ensureCsrfHeader,
   filterProjectMetadata,
+  patchLoadLanguageResponse,
   parseMaxUploadSizeMb,
   parseProjectId,
   resolveCommand,
@@ -756,6 +757,16 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
     }
 
     const upstreamBody = await upstream.arrayBuffer();
+
+    // Patch load-language response to override UI strings
+    if (method === "POST" && isLoadLanguageCommand(params.path) && upstream.ok) {
+      const patched = patchLoadLanguageResponse(upstreamBody);
+      return new Response(patched, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers
+      });
+    }
 
     // Detect project creation via the importing-controller flow.
     // The "Create Project" button calls importing-controller?subCommand=create-project
