@@ -116,9 +116,11 @@ function buildProxyHeaders(request: Request): Headers {
     headers.set("cookie", filteredCookie);
   }
 
-  // Keep OpenRefine initial UI language in Japanese by default.
-  const defaultAcceptLanguage = process.env.OPENREFINE_DEFAULT_ACCEPT_LANGUAGE?.trim() || "ja-JP,ja;q=0.9,en;q=0.7";
-  headers.set("accept-language", defaultAcceptLanguage);
+  // Pass through the browser's Accept-Language to OpenRefine.
+  // If the browser didn't send one, fall back to English.
+  if (!headers.has("accept-language")) {
+    headers.set("accept-language", "en");
+  }
 
   headers.set("x-openrefine-proxy-secret", requireEnv("OPENREFINE_SHARED_SECRET"));
   return headers;
@@ -587,24 +589,17 @@ async function handleSupabaseProjectSaveFromExport(
   }
 }
 
-function resolveDefaultOpenRefineLang(): string {
+function resolveOpenRefineLang(request: Request): string {
   const explicit = process.env.OPENREFINE_DEFAULT_UI_LANG?.trim();
   if (explicit) {
     return explicit;
   }
 
-  const acceptLanguage = process.env.OPENREFINE_DEFAULT_ACCEPT_LANGUAGE?.trim();
-  if (acceptLanguage) {
-    const firstToken = acceptLanguage.split(",")[0]?.trim();
-    if (firstToken) {
-      const normalized = firstToken.split(";")[0]?.trim();
-      if (normalized) {
-        return normalized.split(/[-_]/)[0] ?? "ja";
-      }
-    }
+  const acceptLanguage = request.headers.get("accept-language") ?? "";
+  if (/\bja\b/i.test(acceptLanguage)) {
+    return "ja";
   }
-
-  return "ja";
+  return "en";
 }
 
 function isLoadLanguageCommand(pathSegments: string[] | undefined): boolean {
@@ -629,7 +624,7 @@ async function buildOpenRefineProxyBody(
       const rawBody = await request.text();
       const params = new URLSearchParams(rawBody);
       if (!params.has("lang")) {
-        params.set("lang", resolveDefaultOpenRefineLang());
+        params.set("lang", resolveOpenRefineLang(request));
       }
       return params.toString();
     }
@@ -760,7 +755,7 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
 
     // Patch load-language response to override UI strings
     if (method === "POST" && isLoadLanguageCommand(params.path) && upstream.ok) {
-      const patched = patchLoadLanguageResponse(upstreamBody);
+      const patched = patchLoadLanguageResponse(upstreamBody, resolveOpenRefineLang(request));
       return new Response(patched, {
         status: upstream.status,
         statusText: upstream.statusText,

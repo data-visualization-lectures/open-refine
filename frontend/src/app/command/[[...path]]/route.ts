@@ -97,24 +97,17 @@ type AllMetadataResponse = {
   >;
 };
 
-function resolveDefaultOpenRefineLang(): string {
+function resolveOpenRefineLang(request: Request): string {
   const explicit = process.env.OPENREFINE_DEFAULT_UI_LANG?.trim();
   if (explicit) {
     return explicit;
   }
 
-  const acceptLanguage = process.env.OPENREFINE_DEFAULT_ACCEPT_LANGUAGE?.trim();
-  if (acceptLanguage) {
-    const firstToken = acceptLanguage.split(",")[0]?.trim();
-    if (firstToken) {
-      const normalized = firstToken.split(";")[0]?.trim();
-      if (normalized) {
-        return normalized.split(/[-_]/)[0] ?? "ja";
-      }
-    }
+  const acceptLanguage = request.headers.get("accept-language") ?? "";
+  if (/\bja\b/i.test(acceptLanguage)) {
+    return "ja";
   }
-
-  return "ja";
+  return "en";
 }
 
 async function buildRequestBodyForCommand(
@@ -132,7 +125,7 @@ async function buildRequestBodyForCommand(
       const rawBody = await request.text();
       const params = new URLSearchParams(rawBody);
       if (!params.has("lang")) {
-        params.set("lang", resolveDefaultOpenRefineLang());
+        params.set("lang", resolveOpenRefineLang(request));
       }
       return params.toString();
     }
@@ -308,7 +301,7 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
 
     // Patch load-language response to override UI strings
     if (method === "POST" && command === "load-language" && upstream.ok) {
-      const patched = patchLoadLanguageResponse(upstreamBody);
+      const patched = patchLoadLanguageResponse(upstreamBody, resolveOpenRefineLang(request));
       return new Response(patched, {
         status: upstream.status,
         statusText: upstream.statusText,

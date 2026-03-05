@@ -273,14 +273,16 @@ export function filterProjectMetadata(body: ArrayBuffer, ownedProjectIds: string
  * Patches the load-language JSON response to override specific translation strings.
  * Returns the patched JSON string, or the original text on parse error.
  */
-export function patchLoadLanguageResponse(body: ArrayBuffer): string {
+export function patchLoadLanguageResponse(body: ArrayBuffer, lang: string): string {
   const text = new TextDecoder().decode(body);
   const maxMb = process.env.MAX_UPLOAD_SIZE_MB ?? "10";
   try {
     const json = JSON.parse(text) as { dictionary?: Record<string, string> };
     if (json.dictionary) {
       json.dictionary["core-index-create/question"] =
-        `インポートしたデータからプロジェクトを新規作成します。ファイルサイズの上限は${maxMb}MBです。`;
+        lang === "ja"
+          ? `インポートしたデータからプロジェクトを新規作成します。ファイルサイズの上限は${maxMb}MBです。`
+          : `Create a new project from imported data. Maximum file size is ${maxMb}MB.`;
     }
     return JSON.stringify(json);
   } catch {
