@@ -202,7 +202,61 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 </script>`;
   const customCss = `<style>#or-proj-open { display: none !important; }</style>`;
-  return html.replace("<head>", `<head>\n  <base href="/openrefine/">\n${jqueryUiPatch}\n${customCss}`);
+  const exportButtonPatch = `<script>
+document.addEventListener('DOMContentLoaded', function () {
+  if (typeof Refine === 'undefined') return;
+  var origSetup = Refine.setupProjectMenus;
+  if (!origSetup) return;
+  Refine.setupProjectMenus = function () {
+    origSetup.apply(this, arguments);
+    /* Find the "Open" button placeholder and replace with "Export Project" */
+    var openBtn = document.getElementById('or-proj-open');
+    if (openBtn && openBtn.parentElement) {
+      var anchor = openBtn.parentElement;
+      anchor.removeAttribute('target');
+      anchor.href = 'javascript:void(0)';
+      anchor.style.display = '';
+      openBtn.style.display = '';
+      openBtn.textContent = typeof $.i18n === 'function' ? $.i18n('core-project/export-project') : 'Export Project';
+      anchor.addEventListener('click', function (e) {
+        e.preventDefault();
+        if (typeof theProject !== 'undefined' && theProject.id) {
+          var csrfFn = typeof Refine.wrapCSRF === 'function' ? Refine.wrapCSRF
+                     : (typeof CSRFUtil !== 'undefined' ? CSRFUtil.wrapCSRF : null);
+          if (csrfFn) {
+            csrfFn(function (token) {
+              var form = document.createElement('form');
+              form.method = 'POST';
+              form.action = 'command/core/export-project';
+              var inp1 = document.createElement('input');
+              inp1.type = 'hidden'; inp1.name = 'project'; inp1.value = theProject.id;
+              var inp2 = document.createElement('input');
+              inp2.type = 'hidden'; inp2.name = 'csrf_token'; inp2.value = token;
+              form.appendChild(inp1);
+              form.appendChild(inp2);
+              document.body.appendChild(form);
+              form.submit();
+            });
+          }
+        }
+      });
+    }
+    /* Remove "Export Project" from the Export dropdown */
+    setTimeout(function () {
+      var menuItems = document.querySelectorAll('.menu-container a.menu-item');
+      menuItems.forEach(function (item) {
+        var text = item.textContent.trim();
+        if (text === 'Export project' || text === 'プロジェクトをエクスポート'
+            || (typeof $.i18n === 'function' && text === $.i18n('core-project/export-project'))) {
+          var li = item.closest('li') || item.parentElement;
+          if (li) li.style.display = 'none';
+        }
+      });
+    }, 500);
+  };
+});
+</script>`;
+  return html.replace("<head>", `<head>\n  <base href="/openrefine/">\n${jqueryUiPatch}\n${customCss}\n${exportButtonPatch}`);
 }
 
 function rewriteHomeButtonHref(html: string): string {
