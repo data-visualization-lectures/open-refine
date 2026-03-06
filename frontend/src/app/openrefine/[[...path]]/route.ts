@@ -202,22 +202,19 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 </script>`;
   const customCss = `<style>
-/* Hide "Export Project" item inside the Export dropdown */
-.menu-container [bind="or-proj-exportProject"] { display: none !important; }
+/* Hide empty "Export Project" item inside the Export dropdown (translation cleared) */
+[bind="or-proj-exportProject"] { display: none !important; }
 </style>`;
   const customPatch = `<script>
 (function () {
-  /* Replace "Open" button with "Cloud Save" button after translations load */
-  var patched = false;
-  function patchOpenButton() {
-    if (patched) return;
+  /* Attach cloud-save click handler to the "Save Project" button (formerly "Open").
+     The label is already set by the patched load-language translation. */
+  function attachSaveHandler() {
     var openBtn = document.getElementById('or-proj-open');
     if (!openBtn || !openBtn.parentElement) return;
-    patched = true;
     var anchor = openBtn.parentElement;
-    anchor.removeAttribute('target');
-    anchor.href = 'javascript:void(0)';
-    openBtn.textContent = 'クラウドに保存';
+    if (anchor.dataset.savePatched) return;
+    anchor.dataset.savePatched = '1';
     anchor.addEventListener('click', function (e) {
       e.preventDefault();
       if (typeof theProject === 'undefined' || !theProject.id) return;
@@ -239,12 +236,21 @@ document.addEventListener('DOMContentLoaded', function () {
       });
     });
   }
-  document.addEventListener('DOMContentLoaded', patchOpenButton);
-  /* Retry in case DOMContentLoaded already fired */
-  setTimeout(patchOpenButton, 500);
-  setTimeout(patchOpenButton, 2000);
+  document.addEventListener('DOMContentLoaded', attachSaveHandler);
+  setTimeout(attachSaveHandler, 1000);
 })();
 </script>`;
+
+  // Replace the "Open" button's <a> tag: remove target="_blank" and change href
+  html = html.replace(
+    /(<a\s+href=["']\.\/["']\s+class=["']button["'])\s+target=["']_blank["']/i,
+    '$1'
+  );
+  html = html.replace(
+    /(<a\s+href=["'])\.\/["'](\s+class=["']button["'][^>]*>\s*<span\s+id=["']or-proj-open["'])/i,
+    '$1javascript:void(0)"$2'
+  );
+
   return html.replace("<head>", `<head>\n  <base href="/openrefine/">\n${jqueryUiPatch}\n${customCss}\n${customPatch}`);
 }
 
