@@ -201,7 +201,8 @@ document.addEventListener('DOMContentLoaded', function () {
   };
 });
 </script>`;
-  return html.replace("<head>", `<head>\n  <base href="/openrefine/">\n${jqueryUiPatch}`);
+  const customCss = `<style>#or-proj-open { display: none !important; }</style>`;
+  return html.replace("<head>", `<head>\n  <base href="/openrefine/">\n${jqueryUiPatch}\n${customCss}`);
 }
 
 function rewriteHomeButtonHref(html: string): string {
