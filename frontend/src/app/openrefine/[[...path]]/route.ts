@@ -201,15 +201,23 @@ document.addEventListener('DOMContentLoaded', function () {
   };
 });
 </script>`;
+  const customCss = `<style>
+/* Hide "Export Project" item inside the Export dropdown */
+.menu-container [bind="or-proj-exportProject"] { display: none !important; }
+</style>`;
   const customPatch = `<script>
-document.addEventListener('DOMContentLoaded', function () {
-  /* Replace "Open" button with "Export Project" button */
-  var openBtn = document.getElementById('or-proj-open');
-  if (openBtn && openBtn.parentElement) {
+(function () {
+  /* Replace "Open" button with "Cloud Save" button after translations load */
+  var patched = false;
+  function patchOpenButton() {
+    if (patched) return;
+    var openBtn = document.getElementById('or-proj-open');
+    if (!openBtn || !openBtn.parentElement) return;
+    patched = true;
     var anchor = openBtn.parentElement;
     anchor.removeAttribute('target');
     anchor.href = 'javascript:void(0)';
-    openBtn.textContent = typeof $.i18n === 'function' ? $.i18n('core-project/export-project') : 'Export Project';
+    openBtn.textContent = 'クラウドに保存';
     anchor.addEventListener('click', function (e) {
       e.preventDefault();
       if (typeof theProject === 'undefined' || !theProject.id) return;
@@ -231,27 +239,13 @@ document.addEventListener('DOMContentLoaded', function () {
       });
     });
   }
-
-  /* Hide "Export Project" from the Export dropdown when it opens */
-  var exportBtn = document.getElementById('export-button');
-  if (exportBtn) {
-    exportBtn.addEventListener('click', function () {
-      setTimeout(function () {
-        var items = document.querySelectorAll('.menu-container a.menu-item');
-        var label = typeof $.i18n === 'function' ? $.i18n('core-project/export-project') : '';
-        items.forEach(function (item) {
-          var t = item.textContent.trim();
-          if (t === 'Export project' || t === 'プロジェクトをエクスポート' || (label && t === label)) {
-            var el = item.closest('li') || item.parentElement;
-            if (el) el.style.display = 'none';
-          }
-        });
-      }, 50);
-    });
-  }
-});
+  document.addEventListener('DOMContentLoaded', patchOpenButton);
+  /* Retry in case DOMContentLoaded already fired */
+  setTimeout(patchOpenButton, 500);
+  setTimeout(patchOpenButton, 2000);
+})();
 </script>`;
-  return html.replace("<head>", `<head>\n  <base href="/openrefine/">\n${jqueryUiPatch}\n${customPatch}`);
+  return html.replace("<head>", `<head>\n  <base href="/openrefine/">\n${jqueryUiPatch}\n${customCss}\n${customPatch}`);
 }
 
 function rewriteHomeButtonHref(html: string): string {
