@@ -596,7 +596,8 @@ function resolveOpenRefineLang(request: Request): string {
   }
 
   const acceptLanguage = request.headers.get("accept-language") ?? "";
-  if (/\bja\b/i.test(acceptLanguage)) {
+  const primaryLang = acceptLanguage.split(",")[0]?.trim().split(";")[0]?.trim().toLowerCase() ?? "";
+  if (primaryLang === "ja" || primaryLang.startsWith("ja-")) {
     return "ja";
   }
   return "en";
