@@ -202,57 +202,9 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 </script>`;
   const customCss = `<style>
-/* Hide empty "Export Project" menu items (translation cleared to empty string) */
-.menu-container a.menu-item:empty { display: none !important; }
+a.button:has(> #or-proj-open) { display: none !important; }
 </style>`;
-  const customPatch = `<script>
-(function () {
-  /* Attach cloud-save click handler to the "Save Project" button (formerly "Open").
-     The label is already set by the patched load-language translation. */
-  function attachSaveHandler() {
-    var openBtn = document.getElementById('or-proj-open');
-    if (!openBtn || !openBtn.parentElement) return;
-    var anchor = openBtn.parentElement;
-    if (anchor.dataset.savePatched) return;
-    anchor.dataset.savePatched = '1';
-    anchor.addEventListener('click', function (e) {
-      e.preventDefault();
-      if (typeof theProject === 'undefined' || !theProject.id) return;
-      var csrfFn = typeof Refine !== 'undefined' && Refine.wrapCSRF ? Refine.wrapCSRF
-                 : (typeof CSRFUtil !== 'undefined' ? CSRFUtil.wrapCSRF : null);
-      if (!csrfFn) return;
-      csrfFn(function (token) {
-        var projName = (theProject.metadata && theProject.metadata.name) || 'project';
-        var form = document.createElement('form');
-        form.method = 'POST';
-        form.action = 'command/core/export-project/' + encodeURIComponent(projName) + '.openrefine.tar.gz';
-        var inp1 = document.createElement('input');
-        inp1.type = 'hidden'; inp1.name = 'project'; inp1.value = theProject.id;
-        var inp2 = document.createElement('input');
-        inp2.type = 'hidden'; inp2.name = 'csrf_token'; inp2.value = token;
-        form.appendChild(inp1);
-        form.appendChild(inp2);
-        document.body.appendChild(form);
-        form.submit();
-      });
-    });
-  }
-  document.addEventListener('DOMContentLoaded', attachSaveHandler);
-  setTimeout(attachSaveHandler, 1000);
-})();
-</script>`;
-
-  // Replace the "Open" button's <a> tag: remove target="_blank" and change href
-  html = html.replace(
-    /(<a\s+href=["']\.\/["']\s+class=["']button["'])\s+target=["']_blank["']/i,
-    '$1'
-  );
-  html = html.replace(
-    /(<a\s+href=["'])\.\/["'](\s+class=["']button["'][^>]*>\s*<span\s+id=["']or-proj-open["'])/i,
-    '$1javascript:void(0)"$2'
-  );
-
-  return html.replace("<head>", `<head>\n  <base href="/openrefine/">\n${jqueryUiPatch}\n${customCss}\n${customPatch}`);
+  return html.replace("<head>", `<head>\n  <base href="/openrefine/">\n${jqueryUiPatch}\n${customCss}`);
 }
 
 function rewriteHomeButtonHref(html: string): string {
