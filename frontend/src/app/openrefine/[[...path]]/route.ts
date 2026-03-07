@@ -202,8 +202,8 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 </script>`;
   const customCss = `<style>
-/* Hide empty "Export Project" item inside the Export dropdown (translation cleared) */
-[bind="or-proj-exportProject"] { display: none !important; }
+/* Hide empty "Export Project" menu items (translation cleared to empty string) */
+.menu-container a.menu-item:empty { display: none !important; }
 </style>`;
   const customPatch = `<script>
 (function () {
@@ -222,9 +222,10 @@ document.addEventListener('DOMContentLoaded', function () {
                  : (typeof CSRFUtil !== 'undefined' ? CSRFUtil.wrapCSRF : null);
       if (!csrfFn) return;
       csrfFn(function (token) {
+        var projName = (theProject.metadata && theProject.metadata.name) || 'project';
         var form = document.createElement('form');
         form.method = 'POST';
-        form.action = 'command/core/export-project';
+        form.action = 'command/core/export-project/' + encodeURIComponent(projName) + '.openrefine.tar.gz';
         var inp1 = document.createElement('input');
         inp1.type = 'hidden'; inp1.name = 'project'; inp1.value = theProject.id;
         var inp2 = document.createElement('input');
