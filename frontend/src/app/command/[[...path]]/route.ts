@@ -243,7 +243,14 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
 
     // Ownership enforcement for project-scoped commands
     if (user && shouldEnforceProjectOwnership(command, request.url)) {
-      const projectId = parseProjectId(request.url);
+      let projectId = parseProjectId(request.url);
+      if (!projectId && method === "POST") {
+        const contentType = request.headers.get("content-type") ?? "";
+        if (contentType.includes("application/x-www-form-urlencoded")) {
+          const bodyText = await request.clone().text();
+          projectId = parseProjectIdFromBody(bodyText);
+        }
+      }
       if (!projectId) {
         throw new ApiError(400, "project query parameter is required");
       }
