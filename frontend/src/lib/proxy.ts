@@ -283,8 +283,6 @@ export function patchLoadLanguageResponse(body: ArrayBuffer, lang: string): stri
         lang === "ja"
           ? `インポートしたデータからプロジェクトを新規作成します。ファイルサイズの上限は${maxMb}MBです。`
           : `Create a new project from imported data. Maximum file size is ${maxMb}MB.`;
-      json.dictionary["core-index/try-these"] = "";
-      json.dictionary["core-index/sample-data"] = "";
     }
     return JSON.stringify(json);
   } catch {

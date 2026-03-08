@@ -203,6 +203,7 @@ document.addEventListener('DOMContentLoaded', function () {
 </script>`;
   const customCss = `<style>
 a.button:has(> #or-proj-open) { display: none !important; }
+#or-index-try, #or-index-sample { display: none !important; }
 </style>`;
   return html.replace("<head>", `<head>\n  <base href="/openrefine/">\n${jqueryUiPatch}\n${customCss}`);
 }
