@@ -544,15 +544,16 @@ async function handleSupabaseProjectSaveFromExport(
   const form = new URLSearchParams(formBody);
   const openrefineProjectId = form.get("project");
   const backUrl = resolveBackUrl(request, openrefineProjectId);
+  const lang = resolveOpenRefineLang(request);
 
   try {
     const user = await requireAuthenticatedUser(request);
 
     if (!openrefineProjectId || !/^\d+$/.test(openrefineProjectId)) {
-      throw new ApiError(400, "プロジェクトIDの取得に失敗しました。");
+      throw new ApiError(400, lang === "ja" ? "プロジェクトIDの取得に失敗しました。" : "Failed to retrieve project ID.");
     }
     if (!(await projectBelongsTo(openrefineProjectId, user.id, user.accessToken))) {
-      throw new ApiError(403, "このプロジェクトを保存する権限がありません。");
+      throw new ApiError(403, lang === "ja" ? "このプロジェクトを保存する権限がありません。" : "You do not have permission to save this project.");
     }
     if (!pathSegments || pathSegments.length < 4) {
       throw new ApiError(400, "export-project path is invalid");
@@ -564,7 +565,7 @@ async function handleSupabaseProjectSaveFromExport(
 
     const maxBytes = parseMaxUploadSizeMb() * 1024 * 1024;
     if (archive.byteLength > maxBytes) {
-      throw new ApiError(413, "保存対象が MAX_UPLOAD_SIZE_MB を超えています。");
+      throw new ApiError(413, lang === "ja" ? "保存対象が MAX_UPLOAD_SIZE_MB を超えています。" : "The project exceeds the maximum upload size.");
     }
 
     const savedProjectId = crypto.randomUUID();
@@ -585,10 +586,12 @@ async function handleSupabaseProjectSaveFromExport(
       throw error;
     }
 
-    return renderAlertRedirectPage(`クラウドへ保存しました: ${projectName}`, backUrl, 200);
+    const successMsg = lang === "ja" ? `クラウドへ保存しました: ${projectName}` : `Saved to cloud: ${projectName}`;
+    return renderAlertRedirectPage(successMsg, backUrl, 200);
   } catch (error) {
-    const message = error instanceof ApiError ? error.message : error instanceof Error ? error.message : "Unknown error";
-    return renderAlertRedirectPage(`クラウド保存に失敗しました: ${message}`, backUrl, 500);
+    const detail = error instanceof ApiError ? error.message : error instanceof Error ? error.message : "Unknown error";
+    const failMsg = lang === "ja" ? `クラウド保存に失敗しました: ${detail}` : `Cloud save failed: ${detail}`;
+    return renderAlertRedirectPage(failMsg, backUrl, 500);
   }
 }
 
