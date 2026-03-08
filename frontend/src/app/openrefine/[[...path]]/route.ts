@@ -651,6 +651,23 @@ async function proxy(request: Request, params: { path?: string[] }): Promise<Res
       return handleSupabaseProjectSaveFromExport(request, params.path);
     }
 
+    // Ownership check for the project page itself (/openrefine/project?project=XXXX).
+    // Without this, the HTML loads but subsequent AJAX calls (get-models etc.) return 403,
+    // leaving the user with a blank white screen.
+    if (user && method === "GET" && params.path?.length === 1 && params.path[0] === "project") {
+      const projectId = parseProjectId(request.url);
+      if (projectId) {
+        const belongs = await projectBelongsTo(projectId, user.id, user.accessToken);
+        if (!belongs) {
+          const lang = resolveOpenRefineLang(request);
+          const msg = lang === "ja"
+            ? "このプロジェクトへのアクセス権限がありません。"
+            : "You do not have permission to access this project.";
+          return renderAlertRedirectPage(msg, "/openrefine/", 403);
+        }
+      }
+    }
+
     // Ownership enforcement for project-scoped commands
     if (user && params.path && params.path.length > 0) {
       let command: string;
